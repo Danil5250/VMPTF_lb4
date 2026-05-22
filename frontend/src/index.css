@@ -1,0 +1,25 @@
+@import "tailwindcss";
+
+@layer base {
+    #root {
+        margin: 0 !important;
+        padding: 0 !important;
+        text-align: center;
+    }
+}
+
+@layer utilities {
+    .hide-datepicker::-webkit-calendar-picker-indicator {
+        opacity: 0 !important;
+        display: none !important;
+    }
+    .hide-datepicker::-webkit-inner-spin-button {
+        display: none !important;
+    }
+    .hide-datepicker::-webkit-clear-button {
+        display: none !important;
+    }
+    .hide-datepicker {
+        -moz-appearance: textfield !important;
+    }
+}
