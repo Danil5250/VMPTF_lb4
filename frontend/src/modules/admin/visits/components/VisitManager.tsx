@@ -8,6 +8,7 @@ import Select from 'react-select';
 import { getAllServices } from '../../services/api/servicePageService';
 import { getAllCars } from "../../cars/api/apiCars.ts";
 import { getAutorepairsServices } from "../../autorepair-services/api/autorepairServicesApi.ts";
+import { getAutorepairServices } from '../../../autorepair-services/api/autorepairServicesApi.ts';
 
 
 const VisitManager = () => {
@@ -84,8 +85,8 @@ const VisitManager = () => {
 
         if (option?.value) {
             try {
-                const servicesResponse = await getAutorepairsServices(option.value);
-                const services = servicesResponse?.data || [];
+                const servicesResponse = (await getAutorepairsServices(option.value)).data;
+                const services = servicesResponse || [];
                 const options = services.map((s: any) => ({
                     value: s.service_id,
                     label: `${s.service_name} (${s.service_price} грн)`
@@ -118,16 +119,18 @@ const VisitManager = () => {
         setEditingVisit(visit);
 
         let currentAutorepairServices: any[] = [];
-        try {
-            const servicesResponse = await getAutorepairsServices(visit.autorepair_id)
-            const services = servicesResponse?.data || [];
-            currentAutorepairServices = services.map((s: any) => ({
-                value: s.service_id,
-                label: `${s.service_name} (${s.service_price} грн)`
-            }));
-            setFilteredServiceOptions(currentAutorepairServices);
-        } catch (error) {
-            console.error("Failed to fetch autorepair services", error);
+        if (visit.autorepair_id) {
+            try {
+                const servicesResponse = await getAutorepairServices(visit.autorepair_id);
+                const services = servicesResponse || [];
+                currentAutorepairServices = services.map((s: any) => ({
+                    value: s.service_id,
+                    label: `${s.service_name} (${s.service_price} грн)`
+                }));
+                setFilteredServiceOptions(currentAutorepairServices);
+            } catch (error) {
+                console.error("Failed to fetch autorepair services", error);
+            }
         }
 
 
@@ -316,7 +319,7 @@ const VisitManager = () => {
                                         {
                                         }</td>
                                     <td className="p-4">
-                                        {autorepairs.find(a => a.autorepair_id == visit.autorepair_id).name || visit.autorepair_id}</td>
+                                        {autorepairs.find(a => a.autorepair_id == visit.autorepair_id)?.name || visit.autorepair_id}</td>
                                     <td className="p-4 text-sm font-medium">
                                         <span className={`px-2 py-1 rounded-full ${visit.is_completed ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'}`}>
                                             {visit.is_completed ? 'Completed' : 'Pending'}

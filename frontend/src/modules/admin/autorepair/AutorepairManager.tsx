@@ -71,17 +71,17 @@ const AutorepairManager = () => {
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
 
-        const payload: Autorepair = {
+        const payload: any = {
             name,
-            description,
-            adress,
-            index,
             workers_amount: workersAmount,
-            phone,
-            email,
-            ranking,
-            password
+            ranking
         };
+        if (description) payload.description = description;
+        if (adress) payload.adress = adress;
+        if (index) payload.index = index;
+        if (phone) payload.phone = phone;
+        if (email) payload.email = email;
+        if (password) payload.password = password;
 
         try {
             if (editingAutorepair && editingAutorepair.autorepair_id) {

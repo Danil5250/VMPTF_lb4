@@ -21,11 +21,11 @@ const ClientsProfile = () => {
         const fetchClientData = async () => {
             const result = await getClient(user.id)
 
-            setName(result.client.name)
-            setSurname(result.client.surname ?? "")
-            setMiddlename(result.client.middlename ?? "")
-            setPhoneNumber(result.client.phone)
-            setEmail(result.client.email)
+            setName(result.client.name || "")
+            setSurname(result.client.surname || "")
+            setMiddlename(result.client.middlename || "")
+            setPhoneNumber(result.client.phone || "")
+            setEmail(result.client.email || "")
         }
 
         fetchClientData()

@@ -1,313 +1,300 @@
 import {
     BadRequestException,
-    Inject,
     Injectable,
     InternalServerErrorException,
     NotFoundException,
     UnauthorizedException
-} from "@nestjs/common";
-import { findAllDataFromTable } from '../utils/database.utils';
-import { DATABASE_CONNECTION_TOKEN } from "../config/database.constants";
-import { Pool } from "pg";
-import { ConfigService } from "@nestjs/config";
-import { CreateClientDto } from "./dto/add-client.dto";
-import { getCustomTransformers } from "ts-loader/dist/instances";
-import { CreateServiceDto } from "../services/add-service.dto";
+} from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { DataSource, Repository } from 'typeorm';
+import { ConfigService } from '@nestjs/config';
+import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
-import { hashPassword, validatePassword } from "../utils/passwords";
-import { JwtService } from "@nestjs/jwt";
-import { CreateCarDto } from "./dto/add-car.dto";
-import { isDate } from "class-validator";
-
-
+import { hashPassword, validatePassword } from '../utils/passwords';
+import { Client } from '../entities/client.entity';
+import { Car } from '../entities/car.entity';
+import { Visit } from '../entities/visit.entity';
+import { CreateClientDto } from './dto/add-client.dto';
+import { CreateCarDto } from './dto/add-car.dto';
+import { isDate } from 'class-validator';
 
 @Injectable()
 export class ClientService {
-
-    private readonly tableClientsName: string;
-    private readonly tableVisitsName: string;
-    private readonly tableServicesName: string;
-    private readonly tableVisitsServicesName: string;
-    private readonly tableCars: string;
-    private readonly tableAutorepairs: string;
     private readonly salt: number;
 
-
     constructor(
-        @Inject(DATABASE_CONNECTION_TOKEN) private db: Pool,
-        private configService: ConfigService,
-        private readonly jwtService: JwtService
+        @InjectRepository(Client) private clientRepo: Repository<Client>,
+        @InjectRepository(Car) private carRepo: Repository<Car>,
+        @InjectRepository(Visit) private visitRepo: Repository<Visit>,
+        private readonly dataSource: DataSource,
+        private readonly configService: ConfigService,
+        private readonly jwtService: JwtService,
     ) {
-        this.tableClientsName = this.configService.get<string>('TABLE_CLIENTS')!;
-        this.tableVisitsName = this.configService.get<string>('TABLE_VISITS')!;
-        this.tableServicesName = this.configService.get<string>('TABLE_SERVICES')!;
-        this.tableVisitsServicesName = this.configService.get<string>('TABLE_VISITS_SERVICES')!;
-        this.tableCars = this.configService.get<string>('TABLE_CARS')!;
-        this.tableAutorepairs = this.configService.get<string>('TABLE_AUTOREPAIRS')!;
         this.salt = this.configService.get<number>('SALT')!;
     }
 
-
     async register(createClientDto: CreateClientDto) {
-        const client = await this.db.connect();
-        let transactionCompleted = false;
-
-        if (!createClientDto.login || !createClientDto.password || !createClientDto.login) {
-            throw new BadRequestException("Invalid login or password or email");
+        if (!createClientDto.login || !createClientDto.password || !createClientDto.email) {
+            throw new BadRequestException('Invalid login or password or email');
         }
 
-        try {
-            await client.query('BEGIN');
+        return this.dataSource.transaction(async (manager) => {
+            const existing = await manager.findOne(Client, {
+                where: [
+                    { email: createClientDto.email, name: 'UNKNOWN' },
+                    { login: createClientDto.login },
+                ],
+            });
 
-            const clientResult = await client.query(`SELECT client_id FROM Clients 
-                 WHERE (EMAIL = $1 AND NAME = 'UNKNOWN') OR LOGIN = $2`, [createClientDto.email, createClientDto.login])
-            if (clientResult.rows.length > 0) {
+            if (existing) {
                 throw new BadRequestException('Користувач з таким email, login вже існує');
             }
 
-            const password = await hashPassword(createClientDto.password, +this.salt);
+            const password = await hashPassword(createClientDto.password!, +this.salt);
 
-            await client.query(`INSERT INTO ${this.tableClientsName} (email, login, password) VALUES
-                                        ($1, $2, $3)`, [createClientDto.email,
-            createClientDto.login, password]);
+            const client = manager.create(Client, {
+                email: createClientDto.email,
+                login: createClientDto.login,
+                password,
+            });
 
-            await client.query('COMMIT');
-            transactionCompleted = true;
+            await manager.save(client);
             return { message: 'Користувача успішно зареєстровано' };
-        }
-        catch (error) {
-            await client.query('ROLLBACK');
-
-            if (error instanceof BadRequestException) {
-                throw error;
-            }
-            console.error('Registration error:', error);
+        }).catch((err) => {
+            if (err instanceof BadRequestException) throw err;
+            console.error('Registration error:', err);
             throw new InternalServerErrorException('Помилка реєстрації');
-        }
-        finally {
-            client.release();
-        }
-    }
-
-
-    async validateUserByLogin(login: string, password: string) {
-        const result = await this.db.query(`SELECT client_id, password FROM ${this.tableClientsName}
-        WHERE LOGIN = $1`, [login]);
-
-        if (!result.rows.length) {
-            throw new BadRequestException("Користувача з таким логіном не існує");
-        }
-
-        const matchPasswords = await validatePassword(password, result.rows[0].password)
-
-        if (!matchPasswords) {
-            throw new UnauthorizedException("Неправильний пароль або логін");
-        }
-
-        return result.rows[0];
-
-
-    }
-
-
-    async createAccessToken(id: number, login: string): Promise<string> {
-        const payload = { id, login };
-
-        return this.jwtService.sign(payload, {
-            expiresIn: "20m",
         });
     }
 
+    async validateUserByLogin(login: string, password: string) {
+        const client = await this.clientRepo.findOne({
+            where: { login },
+            select: { clientId: true, password: true },
+        });
 
+        if (!client) {
+            throw new BadRequestException('Користувача з таким логіном не існує');
+        }
+
+        const matchPasswords = await validatePassword(password, client.password!);
+
+        if (!matchPasswords) {
+            throw new UnauthorizedException('Неправильний пароль або логін');
+        }
+
+        return { client_id: client.clientId, password: client.password };
+    }
+
+    async createAccessToken(id: number, login: string): Promise<string> {
+        const payload = { id, login };
+        return this.jwtService.sign(payload, { expiresIn: '20m' });
+    }
 
     async topActiveClients(count: number) {
-        const result = await this.db.query(`
-        SELECT
-            cl.name || ' ' || cl.surname client_full_name,
-    COUNT(DISTINCT v.visit_id) visits_count,
-    COALESCE(SUM(ars.service_price), 0) total_spent,
-    CASE
-        WHEN COUNT(DISTINCT v.visit_id) = 0 THEN 0
-        ELSE COALESCE(SUM(ars.service_price), 0) / COUNT(DISTINCT v.visit_id)
-        END average_price_visit
-FROM Clients cl
-JOIN Cars c ON cl.client_id = c.client_id
-JOIN Visits v ON c.car_id = v.car_id
-JOIN Visit_Services vs ON v.visit_id = vs.visit_id
-JOIN Autorepair_Services ars ON vs.autorepair_service_id = ars.autorepair_service_id AND v.autorepair_id = ars.autorepair_id
-WHERE v.is_completed = TRUE
-AND v.date_time >= CURRENT_DATE - 30
-GROUP BY cl.client_id, cl.name, cl.surname
-ORDER BY total_spent DESC
-LIMIT $1;`, [count]);
-        return result.rows;
+        const result = await this.dataSource.query(`
+            SELECT
+                TRIM(COALESCE(cl.name, '') || ' ' || COALESCE(cl.surname, '')) as client_full_name,
+                COUNT(DISTINCT v.visit_id) visits_count,
+                COALESCE(SUM(ars.service_price), 0) total_spent,
+                CASE
+                    WHEN COUNT(DISTINCT v.visit_id) = 0 THEN 0
+                    ELSE COALESCE(SUM(ars.service_price), 0) / COUNT(DISTINCT v.visit_id)
+                END average_price_visit
+            FROM clients cl
+            JOIN cars c ON cl.client_id = c.client_id
+            JOIN visits v ON c.car_id = v.car_id
+            JOIN visit_services vs ON v.visit_id = vs.visit_id
+            JOIN autorepair_services ars ON vs.autorepair_service_id = ars.autorepair_service_id AND v.autorepair_id = ars.autorepair_id
+            WHERE v.is_completed = TRUE
+            GROUP BY cl.client_id, cl.name, cl.surname
+            ORDER BY total_spent DESC
+            LIMIT $1
+        `, [count]);
+        return result;
     }
 
     async getVisitsByClientId(id: number) {
-        const result = await this.db.query(`
+        const result = await this.dataSource.query(`
             SELECT V.*, C.*, A.name AUTOREPAIR_NAME, A.adress AUTOREPAIR_ADRESS,
                    A.phone AUTOREPAIR_PHONE, A.email autorepair_email
-            FROM ${this.tableVisitsName} V
-                     JOIN ${this.tableCars} C ON V.car_id = C.car_id
-            JOIN ${this.tableAutorepairs} A ON A.autorepair_id = V.autorepair_id
+            FROM visits V
+                     JOIN cars C ON V.car_id = C.car_id
+                     JOIN autorepairs A ON A.autorepair_id = V.autorepair_id
             WHERE C.client_id = $1
             ORDER BY V.date_time DESC
-        `, [id])
-        return result.rows;
+        `, [id]);
+        return result;
     }
-
 
     async getCarsByClientId(id: number) {
-        const result = await this.db.query(`
-        SELECT car_id, brand, model, engine_type, year, insurance, license_plate, vin FROM CARS C
-        WHERE C.CLIENT_ID = $1
-        `, [id]);
+        const cars = await this.carRepo.find({
+            where: { clientId: id },
+            select: { carId: true, brand: true, model: true, engineType: true, year: true, insurance: true, licensePlate: true, vin: true },
+        });
 
-        return result.rows;
+        return cars.map(car => ({
+            car_id: car.carId,
+            brand: car.brand,
+            model: car.model,
+            engine_type: car.engineType,
+            year: car.year,
+            insurance: car.insurance,
+            license_plate: car.licensePlate,
+            vin: car.vin
+        }));
     }
-
 
     async addCarToClient(car: CreateCarDto, clientId: number) {
-        const client = await this.db.connect();
-
-        if (car.insuranceExpiry)
-            if (!isDate(new Date(car.insuranceExpiry)))
-                throw new BadRequestException("Формат дати не правильний")
-
-        try {
-            await client.query('BEGIN');
-
-            const carsWithSameUnique = await client.query(`
-            SELECT CAR_ID FROM CARS 
-            WHERE license_plate = $1 OR vin = $2`, [car.licensePlate, car.vin])
-
-            if (carsWithSameUnique.rows.length)
-                throw new BadRequestException('Автомобіль з такими номером чи vin-кодом присутній')
-
-            const insuranceExpiry = car.insuranceExpiry === '' ? null : car.insuranceExpiry;
-            await client.query(`
-            INSERT INTO CARS (BRAND, MODEL, engine_type, YEAR, insurance, license_plate, VIN, CLIENT_ID)
-            VALUES 
-                ($1, $2, $3, $4, $5, $6, $7, $8)`, [car.brand, car.model, car.engineType, car.year,
-                insuranceExpiry, car.licensePlate, car.vin, clientId])
-
-
-            await client.query('COMMIT');
+        if (car.insuranceExpiry && !isDate(new Date(car.insuranceExpiry))) {
+            throw new BadRequestException('Формат дати не правильний');
         }
-        catch (err) {
-            await client.query('ROLLBACK')
-            throw err
-        }
+
+        return this.dataSource.transaction(async (manager) => {
+            const existing = await manager.findOne(Car, {
+                where: [{ licensePlate: car.licensePlate }, { vin: car.vin }],
+            });
+
+            if (existing) {
+                throw new BadRequestException('Автомобіль з такими номером чи vin-кодом присутній');
+            }
+
+            const insuranceExpiry = car.insuranceExpiry === '' ? null : car.insuranceExpiry ?? null;
+
+            const newCar = manager.create(Car, {
+                brand: car.brand,
+                model: car.model,
+                engineType: car.engineType,
+                year: car.year,
+                insurance: insuranceExpiry ? new Date(insuranceExpiry) : null,
+                licensePlate: car.licensePlate!,
+                vin: car.vin!,
+                clientId,
+            });
+
+            await manager.save(newCar);
+        });
     }
-
-
-
-
-
-
 
     async createClient(createClientDto: CreateClientDto) {
         try {
+            const existingByNameEmail = await this.clientRepo.findOne({
+                where: { name: createClientDto.name, email: createClientDto.email },
+            });
 
-            const resultCheck = await this.db.query(`
-        SELECT CLIENT_ID FROM CLIENTS WHERE name = $1 AND EMAIL = $2;
-        `, [createClientDto.name, createClientDto.email])
-
-            if (resultCheck.rows.length > 0) {
-                throw new BadRequestException("Клієнт с такими параметрами існує задайте інше ім'я та email")
+            if (existingByNameEmail) {
+                throw new BadRequestException("Клієнт с такими параметрами існує задайте інше ім'я та email");
             }
 
-            const checkLogin = await this.db.query(`
-        SELECT CLIENT_ID FROM CLIENTS WHERE LOGIN = $1`, [createClientDto.login])
-
-            if (checkLogin.rows.length > 0) {
-                throw new BadRequestException("Клієнт с такими параметрами існує задайте іншмй login")
+            if (createClientDto.login) {
+                const existingByLogin = await this.clientRepo.findOne({
+                    where: { login: createClientDto.login },
+                });
+                if (existingByLogin) {
+                    throw new BadRequestException('Клієнт с такими параметрами існує задайте іншмй login');
+                }
             }
 
-            const query = `
-      INSERT INTO ${this.tableClientsName} 
-        (name, surname, middlename, email, phone, login) 
-      VALUES ($1, $2, $3, $4, $5, $6)
-      RETURNING *;
-    `;
-            const values = [
-                createClientDto.name,
-                createClientDto.surname,
-                createClientDto.middlename,
-                createClientDto.email,
-                createClientDto.phone,
-                createClientDto.login,
-            ];
+            let hashedPassword = null;
+            if (createClientDto.password) {
+                hashedPassword = await hashPassword(createClientDto.password, +this.salt);
+            }
 
-            const result = await this.db.query(query, values);
-            return result.rows[0];
-        }
-        catch (err) {
+            const client = this.clientRepo.create({
+                name: createClientDto.name,
+                surname: createClientDto.surname ?? null,
+                middlename: createClientDto.middlename ?? null,
+                email: createClientDto.email,
+                phone: createClientDto.phone ?? null,
+                login: createClientDto.login ?? null,
+                password: hashedPassword,
+            });
+
+            return await this.clientRepo.save(client);
+        } catch (err: any) {
+            if (err instanceof BadRequestException) throw err;
             console.log('Error creating client:', err.message);
         }
     }
 
     async findOneClientInfoById(id: number) {
-        const query = `SELECT c.name AS client_name, c.surname AS client_surname,
-        c.middlename AS client_middlename, c.email, c.phone, v.id_visit, v.date_time,
-        v.alternative_date_time, v.note AS visit_note, v.payment_method, v.payment_status,
-        s.name AS service_name, s.description, s.base_price, s.guarantee_period, s.average_duration
-        FROM ${this.tableClientsName} AS c
-        LEFT JOIN ${this.tableVisitsName} AS v ON v.client_id = c.id_client
-        LEFT JOIN ${this.tableVisitsServicesName} AS sv ON sv.visit_id = v.id_visit
-        LEFT JOIN ${this.tableServicesName} AS s ON sv.service_id = s.id_service
-        WHERE c.id_client = $1
-        ORDER BY v.id_visit
-        `;
-        const result = await this.db.query(query, [id]);
-        return result.rows;
+        const result = await this.dataSource.query(`
+            SELECT c.name AS client_name, c.surname AS client_surname,
+                   c.middlename AS client_middlename, c.email, c.phone,
+                   v.visit_id, v.date_time, v.alternative_date_time,
+                   v.note AS visit_note, v.payment_way, v.payment_status,
+                   s.name AS service_name, s.description
+            FROM clients AS c
+            LEFT JOIN visits AS v ON v.car_id IN (SELECT car_id FROM cars WHERE client_id = c.client_id)
+            LEFT JOIN visit_services AS sv ON sv.visit_id = v.visit_id
+            LEFT JOIN autorepair_services AS ars ON ars.autorepair_service_id = sv.autorepair_service_id
+            LEFT JOIN services AS s ON ars.service_id = s.service_id
+            WHERE c.client_id = $1
+            ORDER BY v.visit_id
+        `, [id]);
+        return result;
     }
 
     async getClientById(id: number) {
-        const result = await this.db.query(`SELECT client_id, name, surname,
-                                                   middlename, email, phone, login FROM ${this.tableClientsName} 
-         WHERE client_id = $1;`, [id]);
-        console.log(result.rows[0])
+        const client = await this.clientRepo.findOne({
+            where: { clientId: id },
+            select: { clientId: true, name: true, surname: true, middlename: true, email: true, phone: true, login: true },
+        });
 
-        if (!result) {
+        console.log(client);
+
+        if (!client) {
             throw new NotFoundException(`Client with id ${id} hasn't found`);
         }
 
-        return result.rows[0];
+        return client;
     }
 
     async deleteClient(id: number) {
-        return await this.db.query(`DELETE FROM ${this.tableClientsName} WHERE client_id = $1`, [id]);
+        return this.clientRepo.delete({ clientId: id });
     }
 
     async update(id: number, dto: CreateClientDto) {
-        const { name, surname, middlename, phone, email, login } = dto;
+        const { name, surname, middlename, phone, email, login, password } = dto;
 
-        const result = await this.db.query(`
-        SELECT CLIENT_ID FROM CLIENTS WHERE name = $1 AND EMAIL = $2;
-        `, [name, email])
-
-        if (result.rows.length > 0) {
-            throw new BadRequestException("Клієнт с такими параметрами існує задайте інше ім'я та email")
+        const existing = await this.clientRepo.findOne({ where: { name: name!, email: email! } });
+        if (existing && existing.clientId !== id) {
+            throw new BadRequestException("Клієнт с такими параметрами існує задайте інше ім'я та email");
         }
 
-        const checkLogin = await this.db.query(`
-        SELECT CLIENT_ID FROM CLIENTS WHERE LOGIN = $1`, [login])
-
-        if (checkLogin.rows.length > 0) {
-            throw new BadRequestException("Клієнт с такими параметрами існує задайте іншмй login")
+        if (login) {
+            const existingLogin = await this.clientRepo.findOne({ where: { login } });
+            if (existingLogin && existingLogin.clientId !== id) {
+                throw new BadRequestException('Клієнт с такими параметрами існує задайте іншмй login');
+            }
         }
 
-        return await this.db.query(
-            `UPDATE ${this.tableClientsName}
-       SET name = $1, surname = $2, middlename = $3,
-           phone = $4, email = $5, login = $6
-       WHERE client_id = $7`,
-            [name, surname, middlename, phone, email, login, id]
-        );
+        const updateData: any = {
+            name,
+            surname: surname ?? undefined,
+            middlename: middlename ?? undefined,
+            phone: phone ?? undefined,
+            email,
+            login: login ?? undefined,
+        };
+
+        if (password) {
+            updateData.password = await hashPassword(password, +this.salt);
+        }
+
+        return this.clientRepo.update({ clientId: id }, updateData);
     }
 
     async findAllClients() {
-        return await findAllDataFromTable(this.db, this.tableClientsName);
+        const clients = await this.clientRepo.find();
+        return clients.map(c => ({
+            client_id: c.clientId,
+            name: c.name,
+            surname: c.surname,
+            middlename: c.middlename,
+            email: c.email,
+            phone: c.phone,
+            login: c.login
+        }));
     }
 }

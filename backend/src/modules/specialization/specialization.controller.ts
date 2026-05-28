@@ -1,5 +1,6 @@
 import {Body, Controller, Delete, Get, Param, ParseIntPipe, Post, Put} from "@nestjs/common";
-import { Specialization, SpecializationService } from "./specialization.service";
+import { SpecializationService } from "./specialization.service";
+import { Specialization } from "../entities/specialization.entity";
 import { CreateAutorepairSpecializationDto } from "./dto/create-autorepair-specialization.dto";
 import { UpdateAutorepairSpecializationDto } from "./dto/update-autorepair-specialization.dto";
 import { AutorepairSpecializationResponse } from "./dto/autorepair-specialization-response.dto";

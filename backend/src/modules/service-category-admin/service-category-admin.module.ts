@@ -1,11 +1,12 @@
 import { Module } from '@nestjs/common';
-import { ServiceCategoryAdminService } from './service-category-admin.service';
+import { TypeOrmModule } from '@nestjs/typeorm';
 import { ServiceCategoryAdminController } from './service-category-admin.controller';
-import { DatabaseModule } from '../config/database.module';
+import { ServiceCategoryAdminService } from './service-category-admin.service';
+import { CategoryService } from '../entities/category-service.entity';
 
 @Module({
-    imports: [DatabaseModule],
+    imports: [TypeOrmModule.forFeature([CategoryService])],
     controllers: [ServiceCategoryAdminController],
     providers: [ServiceCategoryAdminService],
 })
-export class ServiceCategoryAdminModule { }
+export class ServiceCategoryAdminModule {}

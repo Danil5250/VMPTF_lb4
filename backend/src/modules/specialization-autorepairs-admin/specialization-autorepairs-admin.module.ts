@@ -1,13 +1,12 @@
-
 import { Module } from '@nestjs/common';
-import { SpecializationAutorepairsAdminService } from './specialization-autorepairs-admin.service';
+import { TypeOrmModule } from '@nestjs/typeorm';
 import { SpecializationAutorepairsAdminController } from './specialization-autorepairs-admin.controller';
-import { DatabaseModule } from '../config/database.module';
+import { SpecializationAutorepairsAdminService } from './specialization-autorepairs-admin.service';
+import { SpecializationAutorepair } from '../entities/specialization-autorepair.entity';
 
 @Module({
-    imports: [DatabaseModule],
-    providers: [SpecializationAutorepairsAdminService],
+    imports: [TypeOrmModule.forFeature([SpecializationAutorepair])],
     controllers: [SpecializationAutorepairsAdminController],
-    exports: [SpecializationAutorepairsAdminService]
+    providers: [SpecializationAutorepairsAdminService],
 })
-export class SpecializationAutorepairsAdminModule { }
+export class SpecializationAutorepairsAdminModule {}

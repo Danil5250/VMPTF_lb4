@@ -1,59 +1,72 @@
-import { Inject, Injectable } from '@nestjs/common';
-import { DATABASE_CONNECTION_TOKEN } from '../config/database.constants';
-import { Pool } from 'pg';
-import { ConfigService } from '@nestjs/config';
+import { Injectable, NotFoundException } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
+import { CategoryService } from '../entities/category-service.entity';
 import { CreateCategoryServiceDto } from './dto/create-category-service.dto';
 import { UpdateCategoryServiceDto } from './dto/update-category-service.dto';
 
 @Injectable()
 export class ServiceCategoryAdminService {
-    private readonly tableServiceCategories: string;
-
     constructor(
-        @Inject(DATABASE_CONNECTION_TOKEN) private db: Pool,
-        private configService: ConfigService
-    ) {
-        this.tableServiceCategories = this.configService.get<string>('TABLE_CATEGORY_SERVICES') || 'Category_Services';
+        @InjectRepository(CategoryService)
+        private readonly categoryServiceRepo: Repository<CategoryService>,
+    ) {}
+
+    private mapCategory(c: CategoryService) {
+        if (!c) return null;
+        return {
+            category_service_id: c.categoryServiceId,
+            category_name: c.categoryName
+        };
     }
 
     async create(createCategoryServiceDto: CreateCategoryServiceDto) {
-        const { category_name } = createCategoryServiceDto;
-        const query = `
-            INSERT INTO ${this.tableServiceCategories} (category_name)
-            VALUES ($1)
-            RETURNING *;
-        `;
-        const result = await this.db.query(query, [category_name]);
-        return result.rows[0];
+        const category = this.categoryServiceRepo.create({
+            categoryName: createCategoryServiceDto.category_name,
+        });
+
+        const saved = await this.categoryServiceRepo.save(category);
+        return this.mapCategory(saved);
     }
 
     async findAll() {
-        const query = `SELECT * FROM ${this.tableServiceCategories} ORDER BY category_service_id ASC`;
-        const result = await this.db.query(query);
-        return result.rows;
+        const categories = await this.categoryServiceRepo.find({
+            order: { categoryServiceId: 'ASC' },
+        });
+        return categories.map(c => this.mapCategory(c));
     }
 
     async findOne(id: number) {
-        const query = `SELECT * FROM ${this.tableServiceCategories} WHERE category_service_id = $1`;
-        const result = await this.db.query(query, [id]);
-        return result.rows[0];
+        const category = await this.categoryServiceRepo.findOneBy({ categoryServiceId: id });
+
+        if (!category) {
+            throw new NotFoundException(`CategoryService with ID ${id} not found`);
+        }
+
+        return this.mapCategory(category);
     }
 
     async update(id: number, updateCategoryServiceDto: UpdateCategoryServiceDto) {
-        const { category_name } = updateCategoryServiceDto;
-        const query = `
-            UPDATE ${this.tableServiceCategories}
-            SET category_name = $1
-            WHERE category_service_id = $2
-            RETURNING *;
-        `;
-        const result = await this.db.query(query, [category_name, id]);
-        return result.rows[0];
+        if (!updateCategoryServiceDto.category_name) {
+            return this.findOne(id);
+        }
+
+        await this.categoryServiceRepo.update(
+            { categoryServiceId: id },
+            { categoryName: updateCategoryServiceDto.category_name }
+        );
+
+        const updated = await this.categoryServiceRepo.findOneBy({ categoryServiceId: id });
+        if (!updated) {
+            throw new NotFoundException(`CategoryService with ID ${id} not found`);
+        }
+
+        return this.mapCategory(updated);
     }
 
     async remove(id: number) {
-        const query = `DELETE FROM ${this.tableServiceCategories} WHERE category_service_id = $1`;
-        await this.db.query(query, [id]);
-        return { deleted: true };
+        const category = await this.findOne(id);
+        await this.categoryServiceRepo.delete({ categoryServiceId: id });
+        return category; // already mapped
     }
 }

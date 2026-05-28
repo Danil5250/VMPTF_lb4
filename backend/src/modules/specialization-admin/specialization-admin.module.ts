@@ -1,12 +1,12 @@
-
 import { Module } from '@nestjs/common';
-import { SpecializationAdminService } from './specialization-admin.service';
+import { TypeOrmModule } from '@nestjs/typeorm';
 import { SpecializationAdminController } from './specialization-admin.controller';
-import { DatabaseModule } from '../config/database.module';
+import { SpecializationAdminService } from './specialization-admin.service';
+import { Specialization } from '../entities/specialization.entity';
 
 @Module({
-    imports: [DatabaseModule],
+    imports: [TypeOrmModule.forFeature([Specialization])],
     controllers: [SpecializationAdminController],
     providers: [SpecializationAdminService],
 })
-export class SpecializationAdminModule { }
+export class SpecializationAdminModule {}

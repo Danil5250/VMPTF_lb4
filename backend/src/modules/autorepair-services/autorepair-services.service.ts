@@ -1,10 +1,11 @@
-import { BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
-import { DATABASE_CONNECTION_TOKEN } from "../config/database.constants";
-import { Pool, QueryResult } from "pg";
-import { ConfigService } from "@nestjs/config";
-import { CreateAutorepairServiceDto } from "./dto/create-autorepair-service.dto";
-import { UpdateAutorepairServiceDto } from "./dto/update-autorepair-service.dto";
-import { AutorepairServiceResponse } from "./dto/autorepair-service-response.dto";
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { DataSource, Repository } from 'typeorm';
+import { AutorepairService as AutorepairServiceEntity } from '../entities/autorepair-service.entity';
+import { Service as ServiceEntity } from '../entities/service.entity';
+import { CreateAutorepairServiceDto } from './dto/create-autorepair-service.dto';
+import { UpdateAutorepairServiceDto } from './dto/update-autorepair-service.dto';
+import { AutorepairServiceResponse } from './dto/autorepair-service-response.dto';
 
 export interface Service {
     service_id: number;
@@ -13,155 +14,106 @@ export interface Service {
 
 @Injectable()
 export class AutorepairServicesService {
-    private readonly tableServices: string;
-
     constructor(
-        @Inject(DATABASE_CONNECTION_TOKEN) private db: Pool,
-        private configService: ConfigService
-    ) {
-        this.tableServices = this.configService.get<string>('TABLE_SERVICES')!;
-    }
+        @InjectRepository(AutorepairServiceEntity) private autorepairServiceRepo: Repository<AutorepairServiceEntity>,
+        @InjectRepository(ServiceEntity) private serviceRepo: Repository<ServiceEntity>,
+        private readonly dataSource: DataSource,
+    ) {}
 
     async getAllServices(): Promise<Service[]> {
         try {
-            const result: QueryResult<Service> = await this.db.query(
-                `SELECT service_id, name FROM ${this.tableServices}`
-            );
-            return result.rows;
-        } catch (error) {
-            throw new BadRequestException(error);
+            const services = await this.serviceRepo.find({
+                select: { serviceId: true, name: true },
+            });
+            return services.map(s => ({ service_id: s.serviceId, name: s.name }));
+        } catch (error: any) {
+            throw new BadRequestException(error.message);
         }
     }
 
     async createAutorepairService(dto: CreateAutorepairServiceDto): Promise<AutorepairServiceResponse> {
         try {
-            const result = await this.db.query(
-                `INSERT INTO autorepair_services
-                (autorepair_id, service_id, service_price, garantie_term, duration)
-                VALUES ($1, $2, $3, $4, $5)
-                RETURNING autorepair_service_id, autorepair_id, service_id, service_price, garantie_term, duration`,
-                [dto.autorepair_id, dto.service_id, dto.service_price, dto.garantie_term || 0, dto.duration]
-            );
+            const newService = this.autorepairServiceRepo.create({
+                autorepairId: dto.autorepair_id,
+                serviceId: dto.service_id,
+                servicePrice: dto.service_price,
+                garantieTerm: dto.garantie_term || 0,
+                duration: dto.duration,
+            });
 
-            const created = result.rows[0];
-
-            // Get service name
-            const serviceResult = await this.db.query(
-                `SELECT name FROM ${this.tableServices} WHERE service_id = $1`,
-                [created.service_id]
-            );
+            const created = await this.autorepairServiceRepo.save(newService);
+            const service = await this.serviceRepo.findOneBy({ serviceId: created.serviceId });
 
             return {
-                ...created,
-                service_name: serviceResult.rows[0]?.name || ''
+                autorepair_service_id: created.autorepairServiceId,
+                autorepair_id: created.autorepairId,
+                service_id: created.serviceId,
+                service_price: created.servicePrice,
+                garantie_term: created.garantieTerm ?? 0,
+                duration: created.duration,
+                service_name: service?.name || '',
             };
-        } catch (error) {
+        } catch (error: any) {
             throw new BadRequestException(`Failed to create autorepair service: ${error.message}`);
         }
     }
 
     async getAutorepairServices(autorepairId: number): Promise<AutorepairServiceResponse[]> {
         try {
-            const result = await this.db.query(
-                `SELECT 
-                    ars.autorepair_service_id,
-                    ars.autorepair_id,
-                    ars.service_id,
-                    s.name as service_name,
-                    ars.service_price,
-                    ars.garantie_term,
-                    ars.duration
+            const result = await this.dataSource.query(`
+                SELECT ars.autorepair_service_id, ars.autorepair_id, ars.service_id,
+                       s.name as service_name, ars.service_price, ars.garantie_term, ars.duration
                 FROM autorepair_services ars
-                JOIN ${this.tableServices} s ON ars.service_id = s.service_id
+                JOIN services s ON ars.service_id = s.service_id
                 WHERE ars.autorepair_id = $1
-                ORDER BY s.name`,
-                [autorepairId]
-            );
-            return result.rows;
-        } catch (error) {
+                ORDER BY s.name
+            `, [autorepairId]);
+            return result;
+        } catch (error: any) {
             throw new BadRequestException(`Failed to get autorepair services: ${error.message}`);
         }
     }
 
-    async updateAutorepairService(
-        id: number,
-        dto: UpdateAutorepairServiceDto
-    ): Promise<AutorepairServiceResponse> {
+    async updateAutorepairService(id: number, dto: UpdateAutorepairServiceDto): Promise<AutorepairServiceResponse> {
         try {
-            const updates: string[] = [];
-            const values: any[] = [];
-            let paramIndex = 1;
+            const updateObj: Partial<AutorepairServiceEntity> = {};
+            if (dto.service_id !== undefined) updateObj.serviceId = dto.service_id;
+            if (dto.service_price !== undefined) updateObj.servicePrice = dto.service_price;
+            if (dto.garantie_term !== undefined) updateObj.garantieTerm = dto.garantie_term;
+            if (dto.duration !== undefined) updateObj.duration = dto.duration;
 
-            if (dto.service_id !== undefined) {
-                updates.push(`service_id = $${paramIndex++}`);
-                values.push(dto.service_id);
-            }
-            if (dto.service_price !== undefined) {
-                updates.push(`service_price = $${paramIndex++}`);
-                values.push(dto.service_price);
-            }
-            if (dto.garantie_term !== undefined) {
-                updates.push(`garantie_term = $${paramIndex++}`);
-                values.push(dto.garantie_term);
-            }
-            if (dto.duration !== undefined) {
-                updates.push(`duration = $${paramIndex++}`);
-                values.push(dto.duration);
-            }
+            if (Object.keys(updateObj).length === 0) throw new BadRequestException('No fields to update');
 
-            if (updates.length === 0) {
-                throw new BadRequestException('No fields to update');
-            }
+            await this.autorepairServiceRepo.update({ autorepairServiceId: id }, updateObj);
 
-            values.push(id);
+            const updated = await this.autorepairServiceRepo.findOneBy({ autorepairServiceId: id });
+            if (!updated) throw new NotFoundException(`Autorepair service with ID ${id} not found`);
 
-            const result = await this.db.query(
-                `UPDATE autorepair_services
-                SET ${updates.join(', ')}
-                WHERE autorepair_service_id = $${paramIndex}
-                RETURNING autorepair_service_id, autorepair_id, service_id, service_price, garantie_term, duration`,
-                values
-            );
-
-            if (result.rows.length === 0) {
-                throw new NotFoundException(`Autorepair service with ID ${id} not found`);
-            }
-
-            const updated = result.rows[0];
-
-            const serviceResult = await this.db.query(
-                `SELECT name FROM ${this.tableServices} WHERE service_id = $1`,
-                [updated.service_id]
-            );
+            const service = await this.serviceRepo.findOneBy({ serviceId: updated.serviceId });
 
             return {
-                ...updated,
-                service_name: serviceResult.rows[0]?.name || ''
+                autorepair_service_id: updated.autorepairServiceId,
+                autorepair_id: updated.autorepairId,
+                service_id: updated.serviceId,
+                service_price: updated.servicePrice,
+                garantie_term: updated.garantieTerm ?? 0,
+                duration: updated.duration,
+                service_name: service?.name || '',
             };
-        } catch (error) {
-            if (error instanceof NotFoundException || error instanceof BadRequestException) {
-                throw error;
-            }
+        } catch (error: any) {
+            if (error instanceof NotFoundException || error instanceof BadRequestException) throw error;
             throw new BadRequestException(`Failed to update autorepair service: ${error.message}`);
         }
     }
 
     async deleteAutorepairService(id: number): Promise<void> {
         try {
-            const result = await this.db.query(
-                `DELETE FROM autorepair_services
-                WHERE autorepair_service_id = $1
-                RETURNING autorepair_service_id`,
-                [id]
-            );
-
-            if (result.rows.length === 0) {
+            const result = await this.autorepairServiceRepo.delete({ autorepairServiceId: id });
+            if (result.affected === 0) {
                 throw new NotFoundException(`Autorepair service with ID ${id} not found`);
             }
-        } catch (error) {
-            if (error instanceof NotFoundException) {
-                throw error;
-            }
+        } catch (error: any) {
+            if (error instanceof NotFoundException) throw error;
             throw new BadRequestException(`Не можна видалити послугу`);
         }
     }

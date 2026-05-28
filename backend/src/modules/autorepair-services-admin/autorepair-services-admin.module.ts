@@ -1,12 +1,12 @@
 import { Module } from '@nestjs/common';
-import { AutorepairServicesAdminService } from './autorepair-services-admin.service';
+import { TypeOrmModule } from '@nestjs/typeorm';
 import { AutorepairServicesAdminController } from './autorepair-services-admin.controller';
-import { DatabaseModule } from '../config/database.module';
+import { AutorepairServicesAdminService } from './autorepair-services-admin.service';
+import { AutorepairService } from '../entities/autorepair-service.entity';
 
 @Module({
-    imports: [DatabaseModule],
+    imports: [TypeOrmModule.forFeature([AutorepairService])],
     controllers: [AutorepairServicesAdminController],
     providers: [AutorepairServicesAdminService],
-    exports: [AutorepairServicesAdminService]
 })
-export class AutorepairServicesAdminModule { }
+export class AutorepairServicesAdminModule {}

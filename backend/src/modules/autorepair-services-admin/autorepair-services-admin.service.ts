@@ -1,104 +1,93 @@
-import { Inject, Injectable, NotFoundException } from "@nestjs/common";
-import { DATABASE_CONNECTION_TOKEN } from "../config/database.constants";
-import { Pool } from "pg";
-import { CreateAutorepairServiceDto } from "./dto/create-autorepair-service.dto";
-import { UpdateAutorepairServiceDto } from "./dto/update-autorepair-service.dto";
+import { Injectable, NotFoundException } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { DataSource, Repository } from 'typeorm';
+import { AutorepairService } from '../entities/autorepair-service.entity';
+import { CreateAutorepairServiceDto } from './dto/create-autorepair-service.dto';
+import { UpdateAutorepairServiceDto } from './dto/update-autorepair-service.dto';
 
 @Injectable()
 export class AutorepairServicesAdminService {
     constructor(
-        @Inject(DATABASE_CONNECTION_TOKEN) private db: Pool
-    ) { }
+        @InjectRepository(AutorepairService)
+        private readonly autorepairServiceRepo: Repository<AutorepairService>,
+        private readonly dataSource: DataSource,
+    ) {}
+
+    async create(createAutorepairServiceDto: CreateAutorepairServiceDto) {
+        const autorepairService = this.autorepairServiceRepo.create({
+            autorepairId: createAutorepairServiceDto.autorepair_id,
+            serviceId: createAutorepairServiceDto.service_id,
+            servicePrice: createAutorepairServiceDto.service_price,
+            garantieTerm: createAutorepairServiceDto.garantie_term,
+            duration: createAutorepairServiceDto.duration,
+        });
+
+        return await this.autorepairServiceRepo.save(autorepairService);
+    }
 
     async findAll() {
-        const query = `
-            SELECT 
-                ars.autorepair_service_id,
-                ars.autorepair_id,
-                ar.name as autorepair_name,
-                ars.service_id,
-                s.name as service_name,
-                ars.service_price,
-                ars.garantie_term,
-                ars.duration
-            FROM Autorepair_Services ars
-            JOIN Autorepairs ar ON ars.autorepair_id = ar.autorepair_id
-            JOIN Services s ON ars.service_id = s.service_id
+        return await this.dataSource.query(`
+            SELECT ars.*, a.name as autorepair_name, s.name as service_name
+            FROM autorepair_services ars
+            JOIN autorepairs a ON ars.autorepair_id = a.autorepair_id
+            JOIN services s ON ars.service_id = s.service_id
             ORDER BY ars.autorepair_service_id DESC
-        `;
-        const result = await this.db.query(query);
-        return result.rows;
+        `);
     }
 
     async findOne(id: number) {
-        const query = `
-            SELECT 
-                ars.*,
-                ar.name as autorepair_name,
-                s.name as service_name
-            FROM Autorepair_Services ars
-            JOIN Autorepairs ar ON ars.autorepair_id = ar.autorepair_id
-            JOIN Services s ON ars.service_id = s.service_id
+        const result = await this.dataSource.query(`
+            SELECT ars.*, a.name as autorepair_name, s.name as service_name
+            FROM autorepair_services ars
+            JOIN autorepairs a ON ars.autorepair_id = a.autorepair_id
+            JOIN services s ON ars.service_id = s.service_id
             WHERE ars.autorepair_service_id = $1
-        `;
-        const result = await this.db.query(query, [id]);
-        if (result.rows.length === 0) {
-            throw new NotFoundException(`Autorepair Service with ID ${id} not found`);
+        `, [id]);
+
+        if (result.length === 0) {
+            throw new NotFoundException(`AutorepairService with ID ${id} not found`);
         }
-        return result.rows[0];
+
+        return result[0];
     }
 
-    async create(dto: CreateAutorepairServiceDto) {
-        const query = `
-            INSERT INTO Autorepair_Services (autorepair_id, service_id, service_price, garantie_term, duration)
-            VALUES ($1, $2, $3, $4, $5)
-            RETURNING *
-        `;
-        const result = await this.db.query(query, [
-            dto.autorepair_id,
-            dto.service_id,
-            dto.service_price,
-            dto.garantie_term || 0,
-            dto.duration
-        ]);
-        return result.rows[0];
-    }
+    async update(id: number, updateAutorepairServiceDto: UpdateAutorepairServiceDto) {
+        const fields = Object.keys(updateAutorepairServiceDto);
+        if (fields.length === 0) {
+            return this.findOne(id);
+        }
 
-    async update(id: number, dto: UpdateAutorepairServiceDto) {
-        const existing = await this.findOne(id);
-        const autorepair_id = dto.autorepair_id !== undefined ? dto.autorepair_id : existing.autorepair_id;
-        const service_id = dto.service_id !== undefined ? dto.service_id : existing.service_id;
-        const service_price = dto.service_price !== undefined ? dto.service_price : existing.service_price;
-        const garantie_term = dto.garantie_term !== undefined ? dto.garantie_term : existing.garantie_term;
-        const duration = dto.duration !== undefined ? dto.duration : existing.duration;
+        const updateObj: any = {};
+        if (updateAutorepairServiceDto.autorepair_id !== undefined) updateObj.autorepairId = updateAutorepairServiceDto.autorepair_id;
+        if (updateAutorepairServiceDto.service_id !== undefined) updateObj.serviceId = updateAutorepairServiceDto.service_id;
+        if (updateAutorepairServiceDto.service_price !== undefined) updateObj.servicePrice = updateAutorepairServiceDto.service_price;
+        if (updateAutorepairServiceDto.garantie_term !== undefined) updateObj.garantieTerm = updateAutorepairServiceDto.garantie_term;
+        if (updateAutorepairServiceDto.duration !== undefined) updateObj.duration = updateAutorepairServiceDto.duration;
 
-        const query = `
-            UPDATE Autorepair_Services
-            SET autorepair_id = $1, service_id = $2, service_price = $3, garantie_term = $4, duration = $5
-            WHERE autorepair_service_id = $6
-            RETURNING *
-        `;
-        const result = await this.db.query(query, [autorepair_id, service_id, service_price, garantie_term, duration, id]);
-        return result.rows[0];
+        await this.autorepairServiceRepo.update({ autorepairServiceId: id }, updateObj);
+
+        return await this.findOne(id);
     }
 
     async remove(id: number) {
-        const result = await this.db.query('DELETE FROM Autorepair_Services WHERE autorepair_service_id = $1 RETURNING *', [id]);
-        if (result.rows.length === 0) {
-            throw new NotFoundException(`Autorepair Service with ID ${id} not found`);
-        }
-        return { message: 'Autorepair Service deleted successfully' };
+        const autorepairService = await this.findOne(id);
+        await this.autorepairServiceRepo.delete({ autorepairServiceId: id });
+        return autorepairService;
     }
 
     async getAutorepairsForSelect() {
-        const query = `SELECT autorepair_id, name FROM Autorepairs ORDER BY name ASC`;
-        const result = await this.db.query(query);
-        return result.rows;
+        return await this.dataSource.query(`
+            SELECT autorepair_id, name
+            FROM autorepairs
+            ORDER BY name
+        `);
     }
 
     async getServicesForSelect() {
-        const query = `SELECT service_id, name FROM Services ORDER BY name ASC`;
-        const result = await this.db.query(query);
-        return result.rows;
+        return await this.dataSource.query(`
+            SELECT service_id, name
+            FROM services
+            ORDER BY name
+        `);
     }
 }

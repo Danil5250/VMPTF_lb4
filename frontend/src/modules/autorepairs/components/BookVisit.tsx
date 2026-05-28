@@ -113,6 +113,7 @@ const BookingModal = ({ autorepairName, autorepairId, onClose }: { autorepairNam
             if (autorepairId) {
                 try {
                     const servicesData = await getAutorepairServicesById(autorepairId);
+                    console.log(servicesData)
                     setServices(servicesData);
                 } catch (error) {
                     console.error('Error fetching services:', error);
@@ -257,7 +258,7 @@ const BookingModal = ({ autorepairName, autorepairId, onClose }: { autorepairNam
                         visit_paymentWay: null,
                         visit_paymentStatus: null,
                         visit_isCompleted: null,
-                        visit_carid: null,
+                        visit_carid: selectedCarId ? String(selectedCarId) : null,
 
                         is_urgent: isUrgent || null,
 
@@ -286,7 +287,7 @@ const BookingModal = ({ autorepairName, autorepairId, onClose }: { autorepairNam
                         visit_paymentWay: null,
                         visit_paymentStatus: null,
                         visit_isCompleted: null,
-                        visit_carid: null,
+                        visit_carid: selectedCarId ? String(selectedCarId) : null,
 
                         is_urgent: isUrgent || null,
 
@@ -325,7 +326,7 @@ const BookingModal = ({ autorepairName, autorepairId, onClose }: { autorepairNam
                         visit_paymentWay: null,
                         visit_paymentStatus: null,
                         visit_isCompleted: null,
-                        visit_carid: null,
+                        visit_carid: selectedCarId ? String(selectedCarId) : null,
 
                         is_urgent: isUrgent || null,
 
@@ -355,7 +356,7 @@ const BookingModal = ({ autorepairName, autorepairId, onClose }: { autorepairNam
                         visit_paymentWay: null,
                         visit_paymentStatus: null,
                         visit_isCompleted: null,
-                        visit_carid: null,
+                        visit_carid: selectedCarId ? String(selectedCarId) : null,
 
                         is_urgent: isUrgent || null,
 

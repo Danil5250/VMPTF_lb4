@@ -1,45 +1,43 @@
-import { Inject, Injectable } from "@nestjs/common";
-import { DATABASE_CONNECTION_TOKEN } from "../config/database.constants";
-import { Pool } from "pg";
-import { CreateCarDto } from "./dto/create-car.dto";
-import { UpdateCarDto } from "./dto/update-car.dto";
+import { Injectable } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { DataSource, Repository } from 'typeorm';
+import { Car } from '../entities/car.entity';
+import { CreateCarDto } from './dto/create-car.dto';
+import { UpdateCarDto } from './dto/update-car.dto';
 
 @Injectable()
 export class CarsService {
     constructor(
-        @Inject(DATABASE_CONNECTION_TOKEN) private db: Pool
-    ) {
-    }
+        @InjectRepository(Car) private carRepo: Repository<Car>,
+        private readonly dataSource: DataSource,
+    ) {}
 
     async create(createCarDto: CreateCarDto) {
         const { brand, model, engine_type, year, insurance, license_plate, vin, client_id } = createCarDto;
-        const query = `
-            INSERT INTO Cars (brand, model, engine_type, year, insurance, license_plate, vin, client_id)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            RETURNING *;
-        `;
-        const values = [brand, model, engine_type, year, insurance, license_plate, vin, client_id];
-        const result = await this.db.query(query, values);
-        return result.rows[0];
+        const car = this.carRepo.create({
+            brand,
+            model,
+            engineType: engine_type,
+            year,
+            insurance: insurance ? new Date(insurance) : null,
+            licensePlate: license_plate,
+            vin,
+            clientId: client_id,
+        });
+        return this.carRepo.save(car);
     }
 
     async findAll() {
-        const query = `
-            SELECT c.*, cl.name as client_name, cl.surname as client_surname 
-            FROM Cars c
-            JOIN Clients cl ON c.client_id = cl.client_id
+        return this.dataSource.query(`
+            SELECT c.*, cl.name as client_name, cl.surname as client_surname
+            FROM cars c
+            JOIN clients cl ON c.client_id = cl.client_id
             ORDER BY c.car_id DESC
-        `;
-        const result = await this.db.query(query);
-        return result.rows;
+        `);
     }
 
     async findOne(id: number) {
-        const result = await this.db.query('SELECT * FROM Cars WHERE car_id = $1', [id]);
-        if (result.rows.length === 0) {
-            return null;
-        }
-        return result.rows[0];
+        return this.carRepo.findOneBy({ carId: id });
     }
 
     async update(id: number, updateCarDto: UpdateCarDto) {
@@ -48,16 +46,28 @@ export class CarsService {
 
         if (fields.length === 0) return null;
 
-        const setClause = fields.map((field, index) => `${field} = $${index + 1}`).join(', ');
-        const query = `UPDATE Cars SET ${setClause} WHERE car_id = $${fields.length + 1} RETURNING *`;
+        // Map camelCase to snake_case for DB columns
+        const fieldMap: Record<string, string> = {
+            brand: 'brand',
+            model: 'model',
+            engine_type: 'engine_type',
+            year: 'year',
+            insurance: 'insurance',
+            license_plate: 'license_plate',
+            vin: 'vin',
+            client_id: 'client_id',
+        };
 
-        // Add id as the last parameter
-        const result = await this.db.query(query, [...values, id]);
-        return result.rows[0];
+        const setClause = fields.map((field, index) => `${fieldMap[field] || field} = $${index + 1}`).join(', ');
+        const result = await this.dataSource.query(
+            `UPDATE cars SET ${setClause} WHERE car_id = $${fields.length + 1} RETURNING *`,
+            [...values, id],
+        );
+        return result[0];
     }
 
     async remove(id: number) {
-        await this.db.query('DELETE FROM Cars WHERE car_id = $1', [id]);
+        await this.carRepo.delete({ carId: id });
         return { deleted: true };
     }
 }

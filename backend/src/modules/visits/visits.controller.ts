@@ -71,16 +71,21 @@ export class VisitsController {
         @Body("clientId", ParseIntPipe) clientId: number,
         @Body("carId", ParseIntPipe) carId: number,
         @Res() res: Response) {
-        const pdfBuffer = await this.appService.getVisitReport(visitId, clientId, carId);
+        try {
+            const pdfBuffer = await this.appService.getVisitReport(visitId, clientId, carId);
 
-        res.set({
-            'Content-Type': 'application/pdf',
-            'Content-Disposition': `attachment; filename="visit-${visitId}.pdf"`,
-            'Content-Length': pdfBuffer.length
-        });
+            res.set({
+                'Content-Type': 'application/pdf',
+                'Content-Disposition': `attachment; filename="visit-${visitId}.pdf"`,
+                'Content-Length': pdfBuffer.length
+            });
 
-        res.send(pdfBuffer);
-        res.end();
+            res.send(pdfBuffer);
+            res.end();
+        } catch (e: any) {
+            console.error("PDF Generate Error", e);
+            res.status(500).json({ message: e.message, stack: e.stack });
+        }
     }
 
 

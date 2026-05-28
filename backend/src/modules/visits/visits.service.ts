@@ -2,1092 +2,712 @@ import {
     BadRequestException,
     ConflictException,
     ForbiddenException,
-    Inject,
     Injectable,
-    InternalServerErrorException, NotFoundException
-} from "@nestjs/common";
-import { DATABASE_CONNECTION_TOKEN } from "../config/database.constants";
-import { Pool, QueryResult } from "pg";
-import { ConfigService } from "@nestjs/config";
-import { findAllDataFromTable } from "../utils/database.utils";
-import { CreateVisitDto } from "./dto/create-visit.dto";
-import { isArray } from "class-validator";
+    InternalServerErrorException,
+    NotFoundException,
+} from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { DataSource, Repository } from 'typeorm';
+import { CreateVisitDto } from './dto/create-visit.dto';
+import { UpdateVisitDto } from './dto/update-visit.dto';
+import { MailService } from '../email/mail.service';
+import { Visit } from '../entities/visit.entity';
+import { Client } from '../entities/client.entity';
+import { Car } from '../entities/car.entity';
+import { VisitService as VisitServiceEntity } from '../entities/visit-service.entity';
+import { AutorepairService as AutorepairServiceEntity } from '../entities/autorepair-service.entity';
 import PDFDocument from 'pdfkit';
-import { Visit } from "../shared/interfaces/visit.interface";
-import { Client } from "../shared/interfaces/client.interface";
-import { Car } from "../shared/interfaces/car.interface";
-import * as path from "node:path";
-import { UpdateVisitDto } from "./dto/update-visit.dto";
-import { UpdateVisitByAdminDto } from "./dto/update-vsit-by-admin";
-import { MailService } from "../email/mail.service";
-
+import * as path from 'node:path';
 
 @Injectable()
 export class VisitsService {
-    private readonly tableClientsName: string;
-    private readonly tableVisitsName: string;
-    private readonly tableServicesName: string;
-    private readonly tableVisitsServicesName: string;
-
     constructor(
-        @Inject(DATABASE_CONNECTION_TOKEN) private db: Pool,
-        private configService: ConfigService,
+        @InjectRepository(Visit) private visitRepo: Repository<Visit>,
+        @InjectRepository(Client) private clientRepo: Repository<Client>,
+        @InjectRepository(Car) private carRepo: Repository<Car>,
+        @InjectRepository(VisitServiceEntity) private visitServiceRepo: Repository<VisitServiceEntity>,
+        @InjectRepository(AutorepairServiceEntity) private autorepairServiceRepo: Repository<AutorepairServiceEntity>,
+        private readonly dataSource: DataSource,
         private readonly mailService: MailService,
-    ) {
-        this.tableClientsName = this.configService.get<string>('TABLE_CLIENTS')!;
-        this.tableVisitsName = this.configService.get<string>('TABLE_VISITS')!;
-        this.tableServicesName = this.configService.get<string>('TABLE_SERVICES')!;
-        this.tableVisitsServicesName = this.configService.get<string>('TABLE_VISITS_SERVICES')!;
-    }
-
+    ) {}
 
     async createVisit(dto: CreateVisitDto, user: any) {
-        //get a client for transaction what guaranties transaction completes within one connection
-        const client = await this.db.connect();
-        let transactionCompleted = false;
-
-        console.log("createVisit", user)
-
-        let isNecessaryCreateClient = true;
-
-        try {
-            await client.query('BEGIN');
+        console.log('createVisit', user);
+        return this.dataSource.transaction(async (manager) => {
+            let isNecessaryCreateClient = true;
 
             if (dto.client_email && dto.client_name) {
-                const findByEmailName = await client.query(
-                    `SELECT client_id FROM Clients WHERE email = $1 AND name = $2`,
-                    [dto.client_email, dto.client_name],
-                );
-                if (findByEmailName.rows.length > 0) {
+                const found = await manager.find(Client, {
+                    where: { email: dto.client_email, name: dto.client_name },
+                });
+                if (found.length > 0) {
                     let isSameClientError = true;
                     if (user?.id) {
-                        for (let i = 0; i < findByEmailName.rows.length; i++) {
-                            if (findByEmailName.rows[i].client_id == user.id) {
+                        for (const c of found) {
+                            if (c.clientId == user.id) {
                                 isNecessaryCreateClient = false;
                                 isSameClientError = false;
                             }
                         }
                     }
-                    if (isSameClientError)
+                    if (isSameClientError) {
                         throw new ConflictException(
-                            `Client with email "${dto.client_email}" and name "${dto.client_name}" already exists`
+                            `Client with email "${dto.client_email}" and name "${dto.client_name}" already exists`,
                         );
+                    }
                 }
-            }
-            else {
-                throw new BadRequestException(
-                    `Client email and name are required`
-                );
+            } else {
+                throw new BadRequestException('Client email and name are required');
             }
 
-            let dbClientId;
+            let dbClientId: number;
 
             if (isNecessaryCreateClient) {
-                const insertClient = await client.query(
-                    `INSERT INTO Clients (name, surname, middlename, email, phone, login, password)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7)
-                     RETURNING client_id`,
-                    [
-                        dto.client_name || 'Unknown',
-                        dto?.client_surname || null,
-                        dto?.client_middlename || null,
-                        dto?.client_email || null,
-                        dto?.client_phone || null,
-                        dto?.client_login || null,
-                        dto?.client_password || null,
-                    ],
-                );
-                dbClientId = insertClient.rows[0].client_id;
-            }
-            else {
+                const newClient = manager.create(Client, {
+                    name: dto.client_name || 'Unknown',
+                    surname: dto.client_surname ?? null,
+                    middlename: dto.client_middlename ?? null,
+                    email: dto.client_email ?? null,
+                    phone: dto.client_phone ?? null,
+                    login: dto.client_login ?? null,
+                    password: dto.client_password ?? null,
+                });
+                const savedClient = await manager.save(newClient);
+                dbClientId = savedClient.clientId;
+            } else {
                 dbClientId = user.id;
             }
 
+            if (dto.car_year && dto.car_year > new Date().getFullYear()) {
+                throw new BadRequestException('Рік автомобіля має бути у межах сучасного');
+            }
 
             let carId: number | null = null;
 
-            if (dto.car_year)
-                if (dto.car_year > new Date().getFullYear()) {
-                    throw new BadRequestException('Рік автомобіля має бути у межах сучасного')
-                }
-
             if (dto.car_vin || dto.car_licensePlate) {
-                const findByVinLicensePlate = await client.query(
-                    `SELECT car_id, client_id FROM cars WHERE license_plate = $1 OR vin = $2`,
-                    [dto.car_licensePlate, dto.car_vin],
-                );
-                if (findByVinLicensePlate.rows.length > 0) {
+                const existingCars = await manager.find(Car, {
+                    where: [{ licensePlate: dto.car_licensePlate }, { vin: dto.car_vin }],
+                });
+                if (existingCars.length > 0) {
                     let isSameCarError = true;
                     if (user?.id) {
-                        console.log("isSameCarError", isSameCarError)
-                        for (let i = 0; i < findByVinLicensePlate.rows.length; i++) {
-                            console.log("isSameCarError", isSameCarError)
-
-                            if (findByVinLicensePlate.rows[i].client_id == user.id) {
-                                carId = findByVinLicensePlate.rows[i].car_id;
+                        for (const c of existingCars) {
+                            if (c.clientId == user.id) {
+                                carId = c.carId;
                                 isSameCarError = false;
-                                console.log("isSameCarError", isSameCarError)
                             }
                         }
                     }
-
-                    if (isSameCarError)
+                    if (isSameCarError) {
                         throw new ConflictException(
-                            `Car with license_plate "${dto.car_licensePlate}" or vin "${dto.car_vin}" already exists`
+                            `Car with license_plate "${dto.car_licensePlate}" or vin "${dto.car_vin}" already exists`,
                         );
+                    }
                 }
-            }
-            else {
-                throw new BadRequestException(
-                    `Car vin and license plate are required`
-                );
+            } else {
+                throw new BadRequestException('Car vin and license plate are required');
             }
 
-            let dbCarId;
+            let dbCarId: number;
             if (!carId) {
-                const insertCar = await client.query(
-                    `INSERT INTO Cars (brand, model, engine_type, year, license_plate, vin, client_id)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7)
-                     RETURNING car_id`,
-                    [
-                        dto.car_brand,
-                        dto.car_model,
-                        dto.car_engineType || null,
-                        dto.car_year || null,
-                        dto.car_licensePlate,
-                        dto.car_vin,
-                        dbClientId,
-                    ],
-                );
-
-                dbCarId = insertCar.rows[0].car_id;
-            }
-            else {
-                dbCarId = carId
+                const newCar = manager.create(Car, {
+                    brand: dto.car_brand,
+                    model: dto.car_model,
+                    engineType: dto.car_engineType ?? null,
+                    year: dto.car_year ?? null,
+                    licensePlate: dto.car_licensePlate!,
+                    vin: dto.car_vin!,
+                    clientId: dbClientId,
+                });
+                const savedCar = await manager.save(newCar);
+                dbCarId = savedCar.carId;
+            } else {
+                dbCarId = carId;
             }
 
             if (!dto.visit_selectedDate && !dto.is_urgent) {
-                throw new BadRequestException("Date of visit cannot be empty");
+                throw new BadRequestException('Date of visit cannot be empty');
             }
 
             if (!dto.is_urgent && new Date(dto.visit_selectedDate!).getTime() < new Date().getTime()) {
-                throw new BadRequestException("Дата візиту має бути від сьогодні");
+                throw new BadRequestException('Дата візиту має бути від сьогодні');
             }
-            //const visitDateTime = new Date(dto.visit_selectedDate);
 
-            const insertVisit = await client.query(
-                `INSERT INTO Visits (date_time, alternative_date_time, note, payment_way, payment_status, is_completed, car_id, autorepair_id,
-                                     is_urgent)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                     RETURNING visit_id`,
-                [
-                    dto.visit_selectedDate ? new Date(dto.visit_selectedDate) : null,
-                    //visitDateTime,
-                    dto.visit_selectedAlternativeDate ? new Date(dto.visit_selectedAlternativeDate) : null,
-                    dto.visit_note ?? null,
-                    'готівка',
-                    'не оплачено',
-                    dto.visit_isCompleted ?? false,
-                    dbCarId,
-                    dto.visit_autorepairId ?? null,
-                    dto.is_urgent ?? false
-                ],
-            );
-            const visitId = insertVisit.rows[0].visit_id;
+            const newVisit = manager.create(Visit, {
+                dateTime: dto.visit_selectedDate ? new Date(dto.visit_selectedDate) : undefined,
+                alternativeDateTime: dto.visit_selectedAlternativeDate
+                    ? new Date(dto.visit_selectedAlternativeDate)
+                    : undefined,
+                note: dto.visit_note ?? undefined,
+                paymentWay: 'готівка',
+                paymentStatus: 'не оплачено',
+                isCompleted: dto.visit_isCompleted !== undefined ? String(dto.visit_isCompleted) === 'true' : false,
+                carId: dbCarId,
+                autorepairId: dto.visit_autorepairId ? Number(dto.visit_autorepairId) : undefined,
+                isUrgent: dto.is_urgent !== undefined ? String(dto.is_urgent) === 'true' : false,
+            });
+            const savedVisit = await manager.save(newVisit);
+            const visitId = savedVisit.visitId;
 
             if (dto.visit_selectedServices && Array.isArray(dto.visit_selectedServices) && dto.visit_selectedServices.length > 0) {
                 for (const service of dto.visit_selectedServices) {
-                    await client.query(
-                        `INSERT INTO Visit_Services (problem_description, visit_id, autorepair_service_id)
-                         VALUES ($1,$2,$3)`,
-                        [null, visitId, service]
-                    );
+                    const vs = manager.create(VisitServiceEntity, {
+                        problemDescription: null,
+                        visitId,
+                        autorepairServiceId: typeof service === 'number' ? service : null,
+                    });
+                    await manager.save(vs);
                 }
             } else if (typeof dto.visit_selectedServices === 'string') {
-                await client.query(
-                    `INSERT INTO Visit_Services (problem_description, visit_id, autorepair_service_id)
-                     VALUES ($1, $2, $3)`,
-                    [dto.visit_selectedServices, visitId, null]
-                );
+                const vs = manager.create(VisitServiceEntity, {
+                    problemDescription: dto.visit_selectedServices,
+                    visitId,
+                    autorepairServiceId: null,
+                });
+                await manager.save(vs);
             }
-
-            await client.query('COMMIT');
-            transactionCompleted = true;
 
             return { visitId, clientId: dbClientId, carId: dbCarId };
-
-        } catch (err) {
-            console.log(err)
-            if (!transactionCompleted) {
-                await client.query('ROLLBACK');
-            }
-
+        }).catch((err) => {
             if (err.code === '23505') {
                 const detail = err.detail || '';
                 if (detail.includes('clients_name_email') || detail.includes('uq_client_name_email')) {
                     throw new ConflictException(
-                        `Client with email "${dto.client_email}" and name "${dto.client_name}" already exists`
+                        `Client with email "${dto.client_email}" and name "${dto.client_name}" already exists`,
                     );
                 } else if (detail.includes('cars_license_plate') || detail.includes('cars_vin')) {
                     throw new BadRequestException(
-                        `Car with license_plate "${dto.car_licensePlate}" or vin "${dto.car_vin}" already exists`
+                        `Car with license_plate "${dto.car_licensePlate}" or vin "${dto.car_vin}" already exists`,
                     );
                 }
             }
-
-            if (err instanceof BadRequestException || err instanceof ConflictException) {
-                throw err;
-            }
-
-            throw new InternalServerErrorException(
-                err.message || 'Database error during visit creation'
-            );
-        } finally {
-            client.release();
-        }
+            if (
+                err instanceof BadRequestException ||
+                err instanceof ConflictException
+            ) throw err;
+            throw new InternalServerErrorException(err.message || 'Database error during visit creation');
+        });
     }
 
     async updateVisit(
         visitId: number,
         dto: UpdateVisitDto,
-        user: any
-    ): Promise<{ visitId: number, clientId: number, carId: number }> {
-        const client = await this.db.connect();
-        let transactionCompleted = false;
+        user: any,
+    ): Promise<{ visitId: number; clientId: number; carId: number }> {
+        return this.dataSource.transaction(async (manager) => {
+            const existingVisit = await manager
+                .createQueryBuilder(Visit, 'v')
+                .innerJoin('v.car', 'c')
+                .addSelect('c.clientId', 'clientId')
+                .where('v.visitId = :visitId', { visitId })
+                .getOne();
 
-        try {
-            await client.query('BEGIN');
-
-            const existingVisit = await client.query(
-                `SELECT v.*, c.client_id, c.car_id 
-             FROM Visits v
-             JOIN Cars c ON v.car_id = c.car_id
-             WHERE v.visit_id = $1`,
-                [visitId]
-            );
-
-            if (existingVisit.rows.length === 0) {
+            if (!existingVisit) {
                 throw new BadRequestException(`Visit with ID ${visitId} not found`);
             }
 
-            const visit = existingVisit.rows[0];
+            const car = await manager.findOne(Car, { where: { carId: existingVisit.carId } });
+            const clientId = car!.clientId;
 
-            if (user?.id && visit.client_id !== user.id) {
+            if (user?.id && clientId !== user.id) {
                 throw new ForbiddenException('You can only update your own visits');
             }
 
-            let dbClientId = visit.client_id;
-            const dbCarId = dto.visit_carid ?? visit.car_id;
+            let dbClientId = clientId;
+            const dbCarId = Number(dto.visit_carid ?? existingVisit.carId);
 
             if (dto.client_email || dto.client_name) {
                 if (dto.client_email && dto.client_name) {
-                    const existingClient = await client.query(
-                        `SELECT client_id FROM Clients 
-                     WHERE email = $1 AND name = $2 AND client_id != $3`,
-                        [dto.client_email, dto.client_name, dbClientId]
-                    );
-
-                    if (existingClient.rows.length > 0) {
+                    const conflictClient = await manager.findOne(Client, {
+                        where: { email: dto.client_email, name: dto.client_name },
+                    });
+                    if (conflictClient && conflictClient.clientId !== dbClientId) {
                         throw new ConflictException(
-                            `Another client with email "${dto.client_email}" and name "${dto.client_name}" already exists`
+                            `Another client with email "${dto.client_email}" and name "${dto.client_name}" already exists`,
                         );
                     }
                 }
-
-                const updateClientQuery = `
-                UPDATE Clients 
-                SET 
-                    name = COALESCE($1, name),
-                    surname = COALESCE($2, surname),
-                    middlename = COALESCE($3, middlename),
-                    email = COALESCE($4, email),
-                    phone = COALESCE($5, phone),
-                    login = COALESCE($6, login)
-                WHERE client_id = $7
-                RETURNING client_id
-            `;
-
-                const updatedClient = await client.query(updateClientQuery, [
-                    dto.client_name,
-                    dto.client_surname,
-                    dto.client_middlename,
-                    dto.client_email,
-                    dto.client_phone,
-                    dto.client_login,
-                    dbClientId
-                ]);
-
-                dbClientId = updatedClient.rows[0].client_id;
+                await manager.update(Client, { clientId: dbClientId }, {
+                    ...(dto.client_name && { name: dto.client_name }),
+                    ...(dto.client_surname !== undefined && { surname: dto.client_surname }),
+                    ...(dto.client_middlename !== undefined && { middlename: dto.client_middlename }),
+                    ...(dto.client_email && { email: dto.client_email }),
+                    ...(dto.client_phone !== undefined && { phone: dto.client_phone }),
+                    ...(dto.client_login !== undefined && { login: dto.client_login }),
+                });
             }
 
             if (dto.car_vin || dto.car_licensePlate) {
-                if (dto.car_vin || dto.car_licensePlate) {
-                    const existingCar = await client.query(
-                        `SELECT car_id, client_id FROM Cars 
-                     WHERE (license_plate = $1 OR vin = $2) 
-                     AND car_id != $3`,
-                        [dto.car_licensePlate, dto.car_vin, dbCarId]
-                    );
-
-                    if (existingCar.rows.length > 0) {
-                        const otherCar = existingCar.rows[0];
-                        if (user?.id && otherCar.client_id !== user.id) {
-                            throw new ConflictException(
-                                `Another car with license_plate "${dto.car_licensePlate}" or vin "${dto.car_vin}" already exists`
-                            );
-                        }
+                const conflictCar = await manager.findOne(Car, {
+                    where: [{ licensePlate: dto.car_licensePlate }, { vin: dto.car_vin }],
+                });
+                if (conflictCar && conflictCar.carId !== dbCarId) {
+                    if (user?.id && conflictCar.clientId !== user.id) {
+                        throw new ConflictException(
+                            `Another car with license_plate "${dto.car_licensePlate}" or vin "${dto.car_vin}" already exists`,
+                        );
                     }
                 }
-
-                //     const updateCarQuery = `
-                //     UPDATE Cars
-                //     SET
-                //         brand = COALESCE($1, brand),
-                //         model = COALESCE($2, model),
-                //         engine_type = COALESCE($3, engine_type),
-                //         year = COALESCE($4, year),
-                //         license_plate = COALESCE($5, license_plate),
-                //         vin = COALESCE($6, vin),
-                //         client_id = COALESCE($7, client_id)
-                //     WHERE car_id = $8 AND client_id = $9
-                //     RETURNING car_id
-                // `;
-                //
-                //     const updatedCar = await client.query(updateCarQuery, [
-                //         dto.car_brand,
-                //         dto.car_model,
-                //         dto.car_engineType,
-                //         dto.car_year,
-                //         dto.car_licensePlate,
-                //         dto.car_vin,
-                //         dbClientId,
-                //         dbCarId,
-                //         dbClientId
-                //     ]);
-                //
-                //     if (updatedCar.rows.length === 0) {
-                //         throw new BadRequestException('Car does not belong to the client');
-                //     }
-                //
-                //     dbCarId = updatedCar.rows[0].car_id;
             }
 
-            const visitDateTime = dto.visit_selectedDate ? new Date(dto.visit_selectedDate) : null;
-            const alternativeDateTime = dto.visit_selectedAlternativeDate
-                ? new Date(dto.visit_selectedAlternativeDate)
-                : null;
-
-            const updateVisitQuery = `
-            UPDATE Visits 
-            SET 
-                date_time = COALESCE($1, date_time),
-                alternative_date_time = $2,
-                note = COALESCE($3, note),
-                payment_way = COALESCE($4, payment_way),
-                payment_status = COALESCE($5, payment_status),
-                is_completed = COALESCE($6, is_completed),
-                car_id = $7,
-                autorepair_id = COALESCE($8, autorepair_id)
-            WHERE visit_id = $9
-            RETURNING visit_id
-            `;
-
-            const updatedVisit = await client.query(updateVisitQuery, [
-                visitDateTime,
-                alternativeDateTime,
-                dto.visit_note,
-                dto.visit_paymentWay,
-                dto.visit_paymentStatus,
-                dto.visit_isCompleted,
-                dbCarId,
-                dto.visit_autorepairId,
-                visitId
-            ]);
+            await manager.update(Visit, { visitId }, {
+                ...(dto.visit_selectedDate && { dateTime: new Date(dto.visit_selectedDate) }),
+                alternativeDateTime: dto.visit_selectedAlternativeDate
+                    ? new Date(dto.visit_selectedAlternativeDate)
+                    : undefined,
+                ...(dto.visit_note !== undefined && { note: dto.visit_note }),
+                ...(dto.visit_paymentWay && { paymentWay: dto.visit_paymentWay }),
+                ...(dto.visit_paymentStatus && { paymentStatus: dto.visit_paymentStatus }),
+                ...(dto.visit_isCompleted !== undefined && { isCompleted: String(dto.visit_isCompleted) === 'true' }),
+                carId: dbCarId,
+                ...(dto.visit_autorepairId && { autorepairId: Number(dto.visit_autorepairId) }),
+            });
 
             if (dto.visit_selectedServices !== undefined) {
-                await client.query(
-                    `DELETE FROM Visit_Services WHERE visit_id = $1`,
-                    [visitId]
-                );
+                await manager.delete(VisitServiceEntity, { visitId });
 
                 if (Array.isArray(dto.visit_selectedServices) && dto.visit_selectedServices.length > 0) {
                     for (const service of dto.visit_selectedServices) {
-                        await client.query(
-                            `INSERT INTO Visit_Services (problem_description, visit_id, autorepair_service_id)
-                         VALUES ($1, $2, $3)`,
-                            [null, visitId, service]
-                        );
+                        const vs = manager.create(VisitServiceEntity, {
+                            problemDescription: null,
+                            visitId,
+                            autorepairServiceId: typeof service === 'number' ? service : null,
+                        });
+                        await manager.save(vs);
                     }
                 } else if (typeof dto.visit_selectedServices === 'string') {
-                    await client.query(
-                        `INSERT INTO Visit_Services (problem_description, visit_id, autorepair_service_id)
-                     VALUES ($1, $2, $3)`,
-                        [dto.visit_selectedServices, visitId, null]
-                    );
+                    const vs = manager.create(VisitServiceEntity, {
+                        problemDescription: dto.visit_selectedServices,
+                        visitId,
+                        autorepairServiceId: null,
+                    });
+                    await manager.save(vs);
                 }
             }
 
-            await client.query('COMMIT');
-            transactionCompleted = true;
-
-            return {
-                visitId: updatedVisit.rows[0].visit_id,
-                clientId: dbClientId,
-                carId: dbCarId
-            };
-
-        } catch (err) {
-            console.error(err);
-
-            if (!transactionCompleted) {
-                await client.query('ROLLBACK');
-            }
-
+            return { visitId, clientId: dbClientId, carId: dbCarId };
+        }).catch((err) => {
             if (err.code === '23505') {
                 const detail = err.detail || '';
-                if (detail.includes('clients_name_email') || detail.includes('uq_client_name_email')) {
-                    throw new ConflictException(
-                        `Client with email "${dto.client_email}" and name "${dto.client_name}" already exists`
-                    );
+                if (detail.includes('uq_client_name_email')) {
+                    throw new ConflictException(`Client with email "${dto.client_email}" and name "${dto.client_name}" already exists`);
                 } else if (detail.includes('cars_license_plate')) {
-                    throw new ConflictException(
-                        `Car with license_plate "${dto.car_licensePlate}" already exists`
-                    );
+                    throw new ConflictException(`Car with license_plate "${dto.car_licensePlate}" already exists`);
                 } else if (detail.includes('cars_vin')) {
-                    throw new ConflictException(
-                        `Car with vin "${dto.car_vin}" already exists`
-                    );
+                    throw new ConflictException(`Car with vin "${dto.car_vin}" already exists`);
                 }
             }
-
-            if (err instanceof BadRequestException ||
+            if (
+                err instanceof BadRequestException ||
                 err instanceof ConflictException ||
                 err instanceof NotFoundException ||
-                err instanceof ForbiddenException) {
-                throw err;
-            }
-
-            throw new InternalServerErrorException(
-                err.message || 'Database error during visit update'
-            );
-        } finally {
-            client.release();
-        }
+                err instanceof ForbiddenException
+            ) throw err;
+            throw new InternalServerErrorException(err.message || 'Database error during visit update');
+        });
     }
 
-
     async getVisitReport(visitId: number, clientId: number, carId: number): Promise<Buffer> {
-        const visit: QueryResult<Visit> = await this.db.query(`
-        SELECT * FROM Visits WHERE visit_id = $1`, [visitId]);
+        try {
+            const visit = await this.visitRepo.findOneBy({ visitId });
+            const client = await this.clientRepo.findOneBy({ clientId });
+            const car = await this.carRepo.findOneBy({ carId });
 
-        const client: QueryResult<Client> = await this.db.query(`
-        SELECT * FROM Clients WHERE client_id = $1`, [clientId]);
+            return new Promise((resolve, reject) => {
+                const doc = new PDFDocument();
+                const fontPath = path.join(__dirname, '..', '..', 'assets', 'fonts', 'DejaVuSans.ttf');
+                doc.registerFont('custom', fontPath);
+                doc.font('custom');
 
-        const car: QueryResult<Car> = await this.db.query(`
-        SELECT * FROM Cars WHERE car_id = $1`, [carId]);
+                const chunks: Buffer[] = [];
+                doc.on('data', (chunk) => chunks.push(chunk));
+                doc.on('end', () => resolve(Buffer.concat(chunks)));
+                doc.on('error', reject);
 
+                doc.fontSize(24).fillColor('#1e293b').text('Підтвердження візиту', { align: 'center' }).moveDown(1.5);
 
-        return new Promise((resolve, reject) => {
-            const doc = new PDFDocument();
+                doc.fontSize(16).fillColor('#0f172a').text('Інформація про клієнта', { underline: true });
+                doc.moveDown(0.5);
+                doc.fontSize(13).fillColor('#334155');
+                doc.text(`ПІБ: ${client?.name || ''} ${client?.surname || ''}`);
+                doc.text(`Email: ${client?.email || '—'}`);
+                doc.text(`Телефон: ${client?.phone || '—'}`);
+                doc.moveDown(1);
 
-            console.log(__dirname);
+                doc.moveTo(50, doc.y).lineTo(550, doc.y).stroke('#cbd5e1').moveDown(1);
 
-            const fontPath = path.join(__dirname, "..", "..", "assets", "fonts", "DejaVuSans.ttf");
-            doc.registerFont("custom", fontPath);
-            doc.font("custom");
+                doc.fontSize(16).fillColor('#0f172a').text('Деталі візиту', { underline: true });
+                doc.moveDown(0.5);
+                doc.fontSize(13).fillColor('#334155');
+                doc.text(`Дата візиту: ${visit?.dateTime?.toLocaleString() || '—'}`);
+                doc.text(`Альтернативна дата: ${visit?.alternativeDateTime?.toLocaleString() || '—'}`);
+                doc.text(`Примітка: ${visit?.note || '—'}`);
+                doc.text(`Спосіб оплати: ${visit?.paymentWay || '—'}`);
+                doc.text(`Статус оплати: ${visit?.paymentStatus || '—'}`);
+                doc.moveDown(1);
 
-            const chunks: Buffer[] = [];
-            doc.on("data", (chunk) => chunks.push(chunk));
-            doc.on("end", () => resolve(Buffer.concat(chunks)));
-            doc.on("error", reject);
+                doc.moveTo(50, doc.y).lineTo(550, doc.y).stroke('#cbd5e1').moveDown(1);
 
-            // Заголовок
-            doc.fontSize(24)
-                .fillColor("#1e293b")
-                .text("Підтвердження візиту", { align: "center" })
-                .moveDown(1.5);
+                doc.fontSize(16).fillColor('#0f172a').text('Автомобіль', { underline: true });
+                doc.moveDown(0.5);
+                doc.fontSize(13).fillColor('#334155');
+                doc.text(`Марка: ${car?.brand}`);
+                doc.text(`Модель: ${car?.model}`);
+                doc.text(`Рік випуску: ${car?.year}`);
+                doc.text(`Держ. номер: ${car?.licensePlate}`);
+                doc.text(`VIN: ${car?.vin}`);
+                doc.moveDown(1);
 
-            // Секція клієнта
-            doc.fontSize(16).fillColor("#0f172a").text("Інформація про клієнта", { underline: true });
-            doc.moveDown(0.5);
-            doc.fontSize(13).fillColor("#334155");
-            doc.text(`ПІБ: ${client.rows[0].name || ""} ${client.rows[0].surname || ""}`);
-            doc.text(`Email: ${client.rows[0].email || "—"}`);
-            doc.text(`Телефон: ${client.rows[0].phone || "—"}`);
-            doc.moveDown(1);
+                doc.fontSize(12).fillColor('#64748b').text(`Дата формування документа: ${new Date().toLocaleString()}`, { align: 'right' });
 
-            // Лінія
-            doc.moveTo(50, doc.y).lineTo(550, doc.y).stroke("#cbd5e1").moveDown(1);
-
-            // Секція візиту
-            doc.fontSize(16).fillColor("#0f172a").text("Деталі візиту", { underline: true });
-            doc.moveDown(0.5);
-            doc.fontSize(13).fillColor("#334155");
-            doc.text(`Дата візиту: ${visit.rows[0].date_time?.toLocaleString() || "—"}`);
-            doc.text(`Альтернативна дата: ${visit.rows[0].alternative_date_time?.toLocaleString() || "—"}`);
-            doc.text(`Примітка: ${visit.rows[0].note || "—"}`);
-            doc.text(`Спосіб оплати: ${visit.rows[0].payment_way || "—"}`);
-            doc.text(`Статус оплати: ${visit.rows[0].payment_status || "—"}`);
-            doc.moveDown(1);
-
-            // Лінія
-            doc.moveTo(50, doc.y).lineTo(550, doc.y).stroke("#cbd5e1").moveDown(1);
-
-            // Секція авто
-            doc.fontSize(16).fillColor("#0f172a").text("Автомобіль", { underline: true });
-            doc.moveDown(0.5);
-            doc.fontSize(13).fillColor("#334155");
-            doc.text(`Марка: ${car.rows[0].brand}`);
-            doc.text(`Модель: ${car.rows[0].model}`);
-            doc.text(`Рік випуску: ${car.rows[0].year}`);
-            doc.text(`Держ. номер: ${car.rows[0].license_plate}`);
-            doc.text(`VIN: ${car.rows[0].vin}`);
-            doc.moveDown(1);
-
-            // Footer
-            doc.fontSize(12)
-                .fillColor("#64748b")
-                .text(`Дата формування документа: ${new Date().toLocaleString()}`, { align: "right" });
-
-            doc.end();
-        });
-
+                doc.end();
+            });
+        } catch (error) {
+            console.error("Error in getVisitReport: ", error);
+            throw error;
+        }
     }
 
     async getVisitAutorepirs(visitId: number) {
-        const relatedServices = await this.db.query(`
-        SELECT ars.service_id 
-        FROM Visit_Services vs
-        JOIN Autorepair_Services ars ON vs.autorepair_service_id = ars.autorepair_service_id
-        WHERE vs.visit_id = $1
+        const result = await this.dataSource.query(`
+            SELECT ars.service_id
+            FROM Visit_Services vs
+            JOIN Autorepair_Services ars ON vs.autorepair_service_id = ars.autorepair_service_id
+            WHERE vs.visit_id = $1
         `, [visitId]);
-        return relatedServices.rows;
-    }
-
-
-    async getVisitAutorepairServicesById(visitId: number) {
-
-        const visitQuery = await this.db.query(`
-        SELECT *
-        FROM Visits v
-        WHERE v.visit_id = $1
-    `, [visitId]);
-
-        if (visitQuery.rows.length === 0) {
-            throw new NotFoundException("Visit not found");
-        }
-
-        const visit = visitQuery.rows[0];
-
-        const autorepairQuery = await this.db.query(`
-        SELECT *
-        FROM Autorepairs
-        WHERE autorepair_id = $1
-    `, [visit.autorepair_id]);
-
-        const autorepair = autorepairQuery.rows[0];
-
-        const selectedServicesQuery = await this.db.query(`
-        SELECT 
-            vs.visit_service_id,
-            s.service_id,
-            s.name,
-            s.description,
-            ars.autorepair_service_id
-        FROM Visit_Services vs
-        JOIN Autorepair_Services ars 
-            ON ars.autorepair_service_id = vs.autorepair_service_id
-        JOIN Services s 
-            ON s.service_id = ars.service_id
-        WHERE vs.visit_id = $1
-    `, [visitId]);
-
-        const selectedServices = selectedServicesQuery.rows;
-
-        const problemDescriptionQuery = await this.db.query(`
-        SELECT problem_description FROM VISIT_SERVICES
-        WHERE VISIT_ID = $1`, [visitId])
-
-        const problemDescription = problemDescriptionQuery.rows[0];
-
-        const allAutorepairServicesQuery = await this.db.query(`
-        SELECT 
-            ars.autorepair_service_id,
-            s.name
-        FROM Autorepair_Services ars
-        JOIN Services s ON s.service_id = ars.service_id
-        WHERE ars.autorepair_id = $1
-        ORDER BY s.name
-    `, [visit.autorepair_id]);
-
-        const allServices = allAutorepairServicesQuery.rows;
-
-
-
-        return {
-            visit,
-            autorepair,
-            selectedServices,
-            problemDescription,
-            allServices
-        };
-    }
-
-
-    async updateVisitByIdSetCompleted(visitId: number, is_completed: boolean) {
-
-        const result = await this.db.query(`
-        UPDATE VISITS SET
-            is_completed = $1
-        WHERE visit_id = $2
-        `, [is_completed, visitId])
-
-        if (is_completed) {
-            const client = await this.db.query(`
-            SELECT 
-                v.visit_id,
-                v.date_time,
-                v.is_urgent,
-
-                c.brand,
-                c.model,
-                c.engine_type,
-                c.year,
-                c.license_plate,
-                c.vin,
-
-                cl.name AS client_name,
-                cl.surname AS client_surname,
-                cl.email AS client_email,
-
-                ar.name AS autorepair_name,
-                ar.adress AS autorepair_address,
-                ar.phone AS autorepair_phone,
-
-                s.name AS service_name,
-                ars.service_price,
-                ars.duration
-            
-            FROM CLIENTS CL
-            INNER JOIN CARS C ON C.CLIENT_ID = CL.CLIENT_ID
-            INNER JOIN VISITS V ON V.CAR_ID = C.CAR_ID
-            LEFT JOIN Visit_Services vs ON v.visit_id = vs.visit_id
-            LEFT JOIN Autorepairs ar ON v.autorepair_id = ar.autorepair_id
-            LEFT JOIN Autorepair_Services ars ON vs.autorepair_service_id = ars.autorepair_service_id
-            LEFT JOIN Services s ON ars.service_id = s.service_id
-            WHERE V.VISIT_ID = $1
-            `, [visitId])
-            const email = client.rows[0]?.client_email;
-
-            if (!email) {
-                throw new BadRequestException('Email клієнта не знайдено');
-
-            }
-
-            const rows = client.rows;
-
-            if (!rows.length) {
-                throw new BadRequestException("Візит з клієнтом не знайдено");
-            }
-
-            // @ts-ignore
-            const date = new Date(rows.date_time ?? new Date());
-
-            const formattedDate =
-                date.getFullYear() + '-' +
-                String(date.getMonth() + 1).padStart(2, '0') + '-' +
-                String(date.getDate()).padStart(2, '0') + ' ' +
-                String(date.getHours()).padStart(2, '0') + ':' +
-                String(date.getMinutes()).padStart(2, '0');
-
-
-
-
-            const servicesHtml = rows
-                .filter(r => r.service_name)
-                .map(r => `
-            <li>
-                ${r.service_name} — 
-                ${r.service_price} грн — 
-                ${r.duration} хв
-            </li>
-        `).join("");
-
-
-
-            const html = `
-        <h2>Ваш візит завершено ✅</h2>
-        
-        <p>Дякуємо, що звернулися до нашого автосервісу.</p>
-        <p>Номер візиту: <b>${visitId}</b></p>
-        <p>Автомайстерня скоро зв'яжиться з Вами щодо часу забирання автомобіля</p>
-
-        <p><b>Дата:</b> ${formattedDate}</p>
-        <p><b>Терміновий:</b> ${rows[0].is_urgent ? "Так" : "Ні"}</p>
-
-        <hr/>
-
-        <h3>👤 Клієнт</h3>
-        <p>${rows[0].client_name} ${rows[0].client_surname ?? ""}</p>
-
-        <h3>🚗 Автомобіль</h3>
-        <ul>
-            <li>Марка: ${rows[0].brand}</li>
-            <li>Модель: ${rows[0].model}</li>
-            <li>Двигун: ${rows[0].engine_type}</li>
-            <li>Рік: ${rows[0].year}</li>
-            <li>Номер: ${rows[0].license_plate}</li>
-            <li>VIN: ${rows[0].vin}</li>
-        </ul>
-
-        <h3>🏢 Автомайстерня</h3>
-        <ul>
-            <li>Назва: ${rows[0].autorepair_name}</li>
-            <li>Адреса: ${rows[0].autorepair_address}</li>
-            <li>Телефон: ${rows[0].autorepair_phone}</li>
-        </ul>
-
-        <h3>🛠️ Обрані послуги</h3>
-        <ul>
-            ${servicesHtml || "<li>Послуги не вибрані</li>"}
-        </ul>
-
-        <br/>
-        <p>Номер візиту: <b>${visitId}</b></p>
-    `;
-
-
-            await this.mailService.sendMail(
-                email,
-                'Ваш візит успішно завершено ✅',
-                'Дякуємо, що скористались нашим сервісом!',
-                html
-            );
-        }
-
-    }
-
-
-
-    async updateVisitDate(visitId: number, date_time: Date) {
-        const result = await this.db.query(`
-        UPDATE VISITS SET
-            date_time = $1
-        WHERE visit_id = $2
-        `, [date_time, visitId])
-
-
-        const visitData = await this.db.query(`
-            SELECT
-                v.visit_id,
-                v.date_time,
-                v.is_urgent,
-
-                c.brand,
-                c.model,
-                c.engine_type,
-                c.year,
-                c.license_plate,
-                c.vin,
-
-                cl.name AS client_name,
-                cl.surname AS client_surname,
-                cl.email AS client_email,
-
-                ar.name AS autorepair_name,
-                ar.adress AS autorepair_address,
-                ar.phone AS autorepair_phone,
-
-                s.name AS service_name,
-                ars.service_price,
-                ars.duration
-
-            FROM Visits v
-                     INNER JOIN Cars c ON v.car_id = c.car_id
-                     INNER JOIN Clients cl ON c.client_id = cl.client_id
-                     LEFT JOIN Autorepairs ar ON v.autorepair_id = ar.autorepair_id
-
-                     LEFT JOIN Visit_Services vs ON v.visit_id = vs.visit_id
-                     LEFT JOIN Autorepair_Services ars ON vs.autorepair_service_id = ars.autorepair_service_id
-                     LEFT JOIN Services s ON ars.service_id = s.service_id
-
-            WHERE v.visit_id = $1
-        `, [visitId]);
-
-        const rows = visitData.rows;
-
-        if (!rows.length) {
-            throw new BadRequestException("Візит не знайдено");
-        }
-
-        const clientEmail = rows[0].client_email;
-
-        const date = new Date(date_time);
-
-        const formattedDate =
-            date.getFullYear() + '-' +
-            String(date.getMonth() + 1).padStart(2, '0') + '-' +
-            String(date.getDate()).padStart(2, '0') + ' ' +
-            String(date.getHours()).padStart(2, '0') + ':' +
-            String(date.getMinutes()).padStart(2, '0');
-
-
-
-
-        const servicesHtml = rows
-            .filter(r => r.service_name)
-            .map(r => `
-            <li>
-                ${r.service_name} — 
-                ${r.service_price} грн — 
-                ${r.duration} хв
-            </li>
-        `).join("");
-
-
-
-        const html = `
-        <h2>✅ Ваш візит підтверджено</h2>
-
-        <p><b>Дата:</b> ${formattedDate}</p>
-        <p><b>Терміновий:</b> ${rows[0].is_urgent ? "Так" : "Ні"}</p>
-
-        <hr/>
-
-        <h3>👤 Клієнт</h3>
-        <p>${rows[0].client_name} ${rows[0].client_surname ?? ""}</p>
-
-        <h3>🚗 Автомобіль</h3>
-        <ul>
-            <li>Марка: ${rows[0].brand}</li>
-            <li>Модель: ${rows[0].model}</li>
-            <li>Двигун: ${rows[0].engine_type}</li>
-            <li>Рік: ${rows[0].year}</li>
-            <li>Номер: ${rows[0].license_plate}</li>
-            <li>VIN: ${rows[0].vin}</li>
-        </ul>
-
-        <h3>🏢 Автомайстерня</h3>
-        <ul>
-            <li>Назва: ${rows[0].autorepair_name}</li>
-            <li>Адреса: ${rows[0].autorepair_address}</li>
-            <li>Телефон: ${rows[0].autorepair_phone}</li>
-        </ul>
-
-        <h3>🛠️ Обрані послуги</h3>
-        <ul>
-            ${servicesHtml || "<li>Послуги не вибрані</li>"}
-        </ul>
-
-        <br/>
-        <p>Номер візиту: <b>${visitId}</b></p>
-        <p>⏳ Очікуєм прибуття в зазначений час</p>
-    `;
-
-        await this.mailService.sendMail(
-            clientEmail,
-            `✅ Ваш візит №${visitId} підтверджено`,
-            'Деталі вашого візиту',
-            html
-        );
-
-
         return result;
     }
 
+    async getVisitAutorepairServicesById(visitId: number) {
+        const visit = await this.visitRepo.findOneBy({ visitId });
+        if (!visit) throw new NotFoundException('Visit not found');
 
+        const autorepairQuery = await this.dataSource.query(`
+            SELECT * FROM Autorepairs WHERE autorepair_id = $1
+        `, [visit.autorepairId]);
+        const autorepair = autorepairQuery[0];
+
+        const selectedServices = await this.dataSource.query(`
+            SELECT vs.visit_service_id, s.service_id, s.name, s.description, ars.autorepair_service_id
+            FROM Visit_Services vs
+            JOIN Autorepair_Services ars ON ars.autorepair_service_id = vs.autorepair_service_id
+            JOIN Services s ON s.service_id = ars.service_id
+            WHERE vs.visit_id = $1
+        `, [visitId]);
+
+        const problemDescriptionQuery = await this.dataSource.query(`
+            SELECT problem_description FROM visit_services WHERE visit_id = $1
+        `, [visitId]);
+        const problemDescription = problemDescriptionQuery[0];
+
+        const allServices = await this.dataSource.query(`
+            SELECT ars.autorepair_service_id, s.name
+            FROM Autorepair_Services ars
+            JOIN Services s ON s.service_id = ars.service_id
+            WHERE ars.autorepair_id = $1
+            ORDER BY s.name
+        `, [visit.autorepairId]);
+        
+        const mappedVisit = {
+            visit_id: visit.visitId,
+            date_time: visit.dateTime,
+            alternative_date_time: visit.alternativeDateTime,
+            note: visit.note,
+            payment_way: visit.paymentWay,
+            payment_status: visit.paymentStatus,
+            is_completed: visit.isCompleted,
+            is_urgent: visit.isUrgent,
+            car_id: visit.carId,
+            autorepair_id: visit.autorepairId
+        };
+
+        return { visit: mappedVisit, autorepair, selectedServices, problemDescription, allServices };
+    }
+
+    async updateVisitByIdSetCompleted(visitId: number, is_completed: boolean) {
+        await this.visitRepo.update({ visitId }, { isCompleted: is_completed });
+
+        if (is_completed) {
+            const rows = await this.dataSource.query(`
+                SELECT
+                    v.visit_id, v.date_time, v.is_urgent,
+                    c.brand, c.model, c.engine_type, c.year, c.license_plate, c.vin,
+                    cl.name AS client_name, cl.surname AS client_surname, cl.email AS client_email,
+                    ar.name AS autorepair_name, ar.adress AS autorepair_address, ar.phone AS autorepair_phone,
+                    s.name AS service_name, ars.service_price, ars.duration
+                FROM clients cl
+                INNER JOIN cars c ON c.client_id = cl.client_id
+                INNER JOIN visits v ON v.car_id = c.car_id
+                LEFT JOIN visit_services vs ON v.visit_id = vs.visit_id
+                LEFT JOIN autorepairs ar ON v.autorepair_id = ar.autorepair_id
+                LEFT JOIN autorepair_services ars ON vs.autorepair_service_id = ars.autorepair_service_id
+                LEFT JOIN services s ON ars.service_id = s.service_id
+                WHERE v.visit_id = $1
+            `, [visitId]);
+
+            const email = rows[0]?.client_email;
+            if (!email) throw new BadRequestException('Email клієнта не знайдено');
+            if (!rows.length) throw new BadRequestException('Візит з клієнтом не знайдено');
+
+            const date = new Date(rows[0].date_time ?? new Date());
+            const formattedDate = this._formatDate(date);
+
+            const servicesHtml = rows
+                .filter((r: any) => r.service_name)
+                .map((r: any) => `<li>${r.service_name} — ${r.service_price} грн — ${r.duration} хв</li>`)
+                .join('');
+
+            const html = `
+                <h2>Ваш візит завершено ✅</h2>
+                <p>Дякуємо, що звернулися до нашого автосервісу.</p>
+                <p>Номер візиту: <b>${visitId}</b></p>
+                <p><b>Дата:</b> ${formattedDate}</p>
+                <p><b>Терміновий:</b> ${rows[0].is_urgent ? 'Так' : 'Ні'}</p>
+                <hr/>
+                <h3>👤 Клієнт</h3>
+                <p>${rows[0].client_name} ${rows[0].client_surname ?? ''}</p>
+                <h3>🚗 Автомобіль</h3>
+                <ul>
+                    <li>Марка: ${rows[0].brand}</li>
+                    <li>Модель: ${rows[0].model}</li>
+                    <li>Двигун: ${rows[0].engine_type}</li>
+                    <li>Рік: ${rows[0].year}</li>
+                    <li>Номер: ${rows[0].license_plate}</li>
+                    <li>VIN: ${rows[0].vin}</li>
+                </ul>
+                <h3>🏢 Автомайстерня</h3>
+                <ul>
+                    <li>Назва: ${rows[0].autorepair_name}</li>
+                    <li>Адреса: ${rows[0].autorepair_address}</li>
+                    <li>Телефон: ${rows[0].autorepair_phone}</li>
+                </ul>
+                <h3>🛠️ Обрані послуги</h3>
+                <ul>${servicesHtml || '<li>Послуги не вибрані</li>'}</ul>
+                <p>Номер візиту: <b>${visitId}</b></p>
+            `;
+
+            await this.mailService.sendMail(email, 'Ваш візит успішно завершено ✅', 'Дякуємо, що скористались нашим сервісом!', html);
+        }
+    }
+
+    async updateVisitDate(visitId: number, date_time: Date) {
+        await this.visitRepo.update({ visitId }, { dateTime: date_time });
+
+        const rows = await this.dataSource.query(`
+            SELECT
+                v.visit_id, v.date_time, v.is_urgent,
+                c.brand, c.model, c.engine_type, c.year, c.license_plate, c.vin,
+                cl.name AS client_name, cl.surname AS client_surname, cl.email AS client_email,
+                ar.name AS autorepair_name, ar.adress AS autorepair_address, ar.phone AS autorepair_phone,
+                s.name AS service_name, ars.service_price, ars.duration
+            FROM visits v
+            INNER JOIN cars c ON v.car_id = c.car_id
+            INNER JOIN clients cl ON c.client_id = cl.client_id
+            LEFT JOIN autorepairs ar ON v.autorepair_id = ar.autorepair_id
+            LEFT JOIN visit_services vs ON v.visit_id = vs.visit_id
+            LEFT JOIN autorepair_services ars ON vs.autorepair_service_id = ars.autorepair_service_id
+            LEFT JOIN services s ON ars.service_id = s.service_id
+            WHERE v.visit_id = $1
+        `, [visitId]);
+
+        if (!rows.length) throw new BadRequestException('Візит не знайдено');
+
+        const clientEmail = rows[0].client_email;
+        const date = new Date(date_time);
+        const formattedDate = this._formatDate(date);
+
+        const servicesHtml = rows
+            .filter((r: any) => r.service_name)
+            .map((r: any) => `<li>${r.service_name} — ${r.service_price} грн — ${r.duration} хв</li>`)
+            .join('');
+
+        const html = `
+            <h2>✅ Ваш візит підтверджено</h2>
+            <p><b>Дата:</b> ${formattedDate}</p>
+            <p><b>Терміновий:</b> ${rows[0].is_urgent ? 'Так' : 'Ні'}</p>
+            <hr/>
+            <h3>👤 Клієнт</h3>
+            <p>${rows[0].client_name} ${rows[0].client_surname ?? ''}</p>
+            <h3>🚗 Автомобіль</h3>
+            <ul>
+                <li>Марка: ${rows[0].brand}</li>
+                <li>Модель: ${rows[0].model}</li>
+                <li>Двигун: ${rows[0].engine_type}</li>
+                <li>Рік: ${rows[0].year}</li>
+                <li>Номер: ${rows[0].license_plate}</li>
+                <li>VIN: ${rows[0].vin}</li>
+            </ul>
+            <h3>🏢 Автомайстерня</h3>
+            <ul>
+                <li>Назва: ${rows[0].autorepair_name}</li>
+                <li>Адреса: ${rows[0].autorepair_address}</li>
+                <li>Телефон: ${rows[0].autorepair_phone}</li>
+            </ul>
+            <h3>🛠️ Обрані послуги</h3>
+            <ul>${servicesHtml || '<li>Послуги не вибрані</li>'}</ul>
+            <p>Номер візиту: <b>${visitId}</b></p>
+            <p>⏳ Очікуєм прибуття в зазначений час</p>
+        `;
+
+        if (clientEmail) {
+            try {
+                await this.mailService.sendMail(
+                    clientEmail,
+                    `✅ Ваш візит №${visitId} підтверджено`,
+                    'Деталі вашого візиту',
+                    html,
+                );
+            } catch (e) {
+                console.error('Failed to send confirmation email:', e);
+            }
+        }
+    }
 
     async findAllVisits(): Promise<any[]> {
         try {
-            const result = await this.db.query(`SELECT
-        v.*,
-        COALESCE(json_agg(ars.service_id) FILTER (WHERE ars.service_id IS NOT NULL), '[]') AS services_ids FROM ${this.tableVisitsName} AS v
-            LEFT JOIN ${this.tableVisitsServicesName} AS vs ON v.visit_id = vs.visit_id
-            LEFT JOIN Autorepair_Services AS ars ON vs.autorepair_service_id = ars.autorepair_service_id
-            GROUP BY v.visit_id
-            ORDER BY v.visit_id;`);
-            if (result.rows) return result.rows;
-            else return [];
-        }
-        catch (error) {
+            const result = await this.dataSource.query(`
+                SELECT v.*,
+                    COALESCE(json_agg(ars.service_id) FILTER (WHERE ars.service_id IS NOT NULL), '[]') AS services_ids
+                FROM visits AS v
+                LEFT JOIN visit_services AS vs ON v.visit_id = vs.visit_id
+                LEFT JOIN Autorepair_Services AS ars ON vs.autorepair_service_id = ars.autorepair_service_id
+                GROUP BY v.visit_id
+                ORDER BY v.visit_id
+            `);
+            return result ?? [];
+        } catch (error) {
             console.log(error);
             return [];
         }
     }
 
     async findAllVisitsClients(): Promise<any[]> {
-        const result = await this.db.query(`SELECT v.VISIT_ID, date_time, alternative_date_time,
-       note, payment_way, payment_status, is_completed, is_urgent ,CL.name,surname,middlename,email,phone FROM ${this.tableVisitsName} AS v
-    JOIN cars AS c ON v.car_id = c.car_id
-    JOIN CLIENTS CL ON CL.CLIENT_ID = C.CLIENT_ID`);
-        return result.rows;
+        const result = await this.dataSource.query(`
+            SELECT v.visit_id, date_time, alternative_date_time,
+                   note, payment_way, payment_status, is_completed, is_urgent,
+                   cl.name, surname, middlename, email, phone
+            FROM visits AS v
+            JOIN cars AS c ON v.car_id = c.car_id
+            JOIN clients cl ON cl.client_id = c.client_id
+        `);
+        return result;
     }
 
     async selectVisitsClientsServices(): Promise<any[]> {
-        const result = await this.db.query(`SELECT sv.visit_service_id, c.client_id, cL.name AS client_name,
-       cL.surname AS client_surname, cL.middlename AS client_middlename, cL.email, cL.phone, v.visit_id, v.date_time, v.alternative_date_time,
-       v.note AS visit_note, v.payment_WAY, v.payment_status, sv.autorepair_service_id, SER.name AS service_name, SER.description, s.service_price,
-       s.garantie_term, s.duration FROM
-    VISIT_SERVICES AS sv
-    JOIN ${this.tableVisitsName} AS v ON sv.visit_id = v.visit_id
-    JOIN Autorepair_Services AS s ON sv.autorepair_service_id = s.autorepair_service_id
-    JOIN sERVICES AS SER ON s.service_id = SER.service_id
-    JOIN cars AS c ON v.car_id = c.car_id
-    JOIN CLIENTS CL ON CL.CLIENT_ID = C.CLIENT_ID
-    ORDER BY c.client_id
-    `);
-        return result.rows;
+        const result = await this.dataSource.query(`
+            SELECT sv.visit_service_id, c.client_id, cl.name AS client_name,
+                   cl.surname AS client_surname, cl.middlename AS client_middlename,
+                   cl.email, cl.phone, v.visit_id, v.date_time, v.alternative_date_time,
+                   v.note AS visit_note, v.payment_way, v.payment_status,
+                   sv.autorepair_service_id, ser.name AS service_name, ser.description,
+                   s.service_price, s.garantie_term, s.duration
+            FROM visit_services AS sv
+            JOIN visits AS v ON sv.visit_id = v.visit_id
+            JOIN autorepair_services AS s ON sv.autorepair_service_id = s.autorepair_service_id
+            JOIN services AS ser ON s.service_id = ser.service_id
+            JOIN cars AS c ON v.car_id = c.car_id
+            JOIN clients cl ON cl.client_id = c.client_id
+            ORDER BY c.client_id
+        `);
+        return result;
     }
 
-
     async deleteVisit(id: number) {
-        await this.db.query(`DELETE FROM ${this.tableVisitsName} WHERE visit_id = $1`, [id]);
+        await this.visitRepo.delete({ visitId: id });
     }
 
     async createVisitByAdmin(dto: any) {
+        console.log('createVisitByAdmin', dto);
 
-        console.log("createVisitByAdmin", dto);
-
-        const client = await this.db.connect();
-        try {
-            await client.query('BEGIN');
-
-            const insertVisit = await client.query(
-                `INSERT INTO ${this.tableVisitsName} (date_time, note, payment_way, payment_status, is_completed, is_urgent, car_id, autorepair_id, alternative_date_time)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-                 RETURNING visit_id`,
-                [
-                    dto.date_time,
-                    dto.note || null,
-                    dto.payment_way,
-                    dto.payment_status, // payment_status
-                    dto.is_completed,
-                    dto.is_urgent || false,
-                    dto.car_id,
-                    dto.autorepair_id || null,
-                    dto.alternative_date_time
-                ],
-            );
-
-            const visitId = insertVisit.rows[0].visit_id;
+        return this.dataSource.transaction(async (manager) => {
+            const newVisit = manager.create(Visit, {
+                dateTime: dto.date_time,
+                note: dto.note || null,
+                paymentWay: dto.payment_way,
+                paymentStatus: dto.payment_status,
+                isCompleted: dto.is_completed,
+                isUrgent: dto.is_urgent || false,
+                carId: dto.car_id,
+                autorepairId: dto.autorepair_id || null,
+                alternativeDateTime: dto.alternative_date_time,
+            });
+            const savedVisit = await manager.save(newVisit);
+            const visitId = savedVisit.visitId;
 
             if (dto.services_ids && dto.services_ids.length > 0) {
                 for (const serviceId of dto.services_ids) {
-                    if (!dto.autorepair_id) {
-                        throw new BadRequestException("Autorepair is required to add services");
+                    if (!dto.autorepair_id) throw new BadRequestException('Autorepair is required to add services');
+
+                    let arsEntity = await manager.findOne(AutorepairServiceEntity, {
+                        where: { autorepairId: dto.autorepair_id, serviceId },
+                    });
+
+                    if (!arsEntity) {
+                        // Cannot insert without price/duration (NOT NULL constraints), skip
+                        continue;
                     }
 
-                    const findAutorepairService = await client.query(
-                        `SELECT autorepair_service_id FROM Autorepair_Services WHERE autorepair_id = $1 AND service_id = $2`,
-                        [dto.autorepair_id, serviceId]
-                    );
-
-                    let autorepairServiceId;
-
-                    if (findAutorepairService.rows.length > 0) {
-                        autorepairServiceId = findAutorepairService.rows[0].autorepair_service_id;
-                    }
-                    else {
-                        const insertAutorepairService = await client.query(
-                            `INSERT INTO Autorepair_Services (autorepair_id, service_id, price)
-                                 VALUES ($1,$2,null)
-                                 RETURNING autorepair_service_id`,
-                            [dto.autorepair_id, serviceId]
-                        );
-                        autorepairServiceId = insertAutorepairService.rows[0].autorepair_service_id;
-                    }
-
-                    await client.query(
-                        `INSERT INTO ${this.tableVisitsServicesName} (visit_id, autorepair_service_id)
-                          VALUES ($1,$2)`,
-                        [visitId, autorepairServiceId],
-                    );
+                    const vs = manager.create(VisitServiceEntity, {
+                        visitId,
+                        autorepairServiceId: arsEntity.autorepairServiceId,
+                    });
+                    await manager.save(vs);
                 }
             }
 
-            await client.query('COMMIT');
             return { message: 'Visit created successfully' };
-        } catch (e) {
-            await client.query('ROLLBACK');
-            throw e;
-        } finally {
-            client.release();
-        }
+        });
     }
 
     async updateVisitByAdmin(visitId: number, dto: any) {
-        const client = await this.db.connect();
-        try {
-            await client.query('BEGIN');
+        return this.dataSource.transaction(async (manager) => {
+            await manager.update(Visit, { visitId }, {
+                dateTime: dto.date_time,
+                note: dto.note || null,
+                isUrgent: dto.is_urgent || false,
+                carId: dto.car_id,
+                autorepairId: dto.autorepair_id,
+                alternativeDateTime: dto.alternative_date_time,
+                paymentWay: dto.payment_way,
+                paymentStatus: dto.payment_status,
+                isCompleted: dto.is_completed,
+            });
 
-            await client.query(
-                `UPDATE ${this.tableVisitsName}
-                 SET date_time = $1,
-                     note = $2,
-                     is_urgent = $3,
-                     car_id = $4,
-                     autorepair_id = $5,
-                     alternative_date_time = $6,
-                     payment_way = $7,
-                     payment_status = $8,
-                     is_completed = $9
-                 WHERE visit_id = $10`,
-                [
-                    dto.date_time,
-                    dto.note || null,
-                    dto.is_urgent || false,
-                    dto.car_id,
-                    dto.autorepair_id,
-                    dto.alternative_date_time,
-                    dto.payment_way,
-                    dto.payment_status,
-                    dto.is_completed,
-                    visitId
-                ]
-            );
-
-            await client.query(`DELETE FROM ${this.tableVisitsServicesName} WHERE visit_id = $1`, [visitId]);
+            await manager.delete(VisitServiceEntity, { visitId });
 
             if (dto.services_ids && dto.services_ids.length > 0) {
                 for (const serviceId of dto.services_ids) {
-                    if (!dto.autorepair_id) {
-                        throw new BadRequestException("Autorepair is required to add services");
-                    }
+                    if (!dto.autorepair_id) throw new BadRequestException('Autorepair is required to add services');
 
-                    const findAutorepairService = await client.query(
-                        `SELECT autorepair_service_id FROM Autorepair_Services WHERE autorepair_id = $1 AND service_id = $2`,
-                        [dto.autorepair_id, serviceId]
-                    );
+                    let arsEntity = await manager.findOne(AutorepairServiceEntity, {
+                        where: { autorepairId: dto.autorepair_id, serviceId },
+                    });
 
-                    let autorepairServiceId;
+                    if (!arsEntity) continue;
 
-                    if (findAutorepairService.rows.length > 0) {
-                        autorepairServiceId = findAutorepairService.rows[0].autorepair_service_id;
-                    } else {
-                        const insertAutorepairService = await client.query(
-                            `INSERT INTO Autorepair_Services (autorepair_id, service_id, price)
-                             VALUES ($1,$2,null)
-                             RETURNING autorepair_service_id`,
-                            [dto.autorepair_id, serviceId]
-                        );
-                        autorepairServiceId = insertAutorepairService.rows[0].autorepair_service_id;
-                    }
-
-                    await client.query(
-                        `INSERT INTO ${this.tableVisitsServicesName} (visit_id, autorepair_service_id)
-                         VALUES ($1,$2)`,
-                        [visitId, autorepairServiceId],
-                    );
+                    const vs = manager.create(VisitServiceEntity, {
+                        visitId,
+                        autorepairServiceId: arsEntity.autorepairServiceId,
+                    });
+                    await manager.save(vs);
                 }
             }
 
-            await client.query('COMMIT');
             return { message: 'Visit updated successfully' };
-        } catch (e) {
-            await client.query('ROLLBACK');
-            throw e;
-        } finally {
-            client.release();
-        }
+        });
+    }
+
+    private _formatDate(date: Date): string {
+        return (
+            date.getFullYear() +
+            '-' +
+            String(date.getMonth() + 1).padStart(2, '0') +
+            '-' +
+            String(date.getDate()).padStart(2, '0') +
+            ' ' +
+            String(date.getHours()).padStart(2, '0') +
+            ':' +
+            String(date.getMinutes()).padStart(2, '0')
+        );
     }
 }

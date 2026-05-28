@@ -1,73 +1,59 @@
-
-import { Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { Pool } from 'pg';
-import { ConfigService } from '@nestjs/config';
-import { DATABASE_CONNECTION_TOKEN } from '../config/database.constants';
+import { Injectable, NotFoundException } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
+import { Autorepair } from '../entities/autorepair.entity';
 import { CreateAutorepairDto } from './dto/create-autorepair.dto';
 import { UpdateAutorepairDto } from './dto/update-autorepair.dto';
 
 @Injectable()
 export class AutorepairsAdminService {
-    private readonly tableAutorepairs: string;
-
     constructor(
-        @Inject(DATABASE_CONNECTION_TOKEN) private db: Pool,
-        private configService: ConfigService,
-    ) {
-        this.tableAutorepairs = this.configService.get<string>('TABLE_AUTOREPAIRS') || 'Autorepairs';
-    }
+        @InjectRepository(Autorepair)
+        private readonly autorepairRepo: Repository<Autorepair>,
+    ) {}
 
     async create(createAutorepairDto: CreateAutorepairDto) {
-        const {
-            name,
-            description,
-            adress,
-            index,
-            workers_amount,
-            phone,
-            email,
-            ranking,
-            password,
-        } = createAutorepairDto;
+        const autorepair = this.autorepairRepo.create({
+            name: createAutorepairDto.name,
+            description: createAutorepairDto.description,
+            adress: createAutorepairDto.adress,
+            index: createAutorepairDto.index,
+            workersAmount: createAutorepairDto.workers_amount ?? 1,
+            phone: createAutorepairDto.phone,
+            email: createAutorepairDto.email,
+            ranking: createAutorepairDto.ranking ?? 0,
+            password: createAutorepairDto.password,
+        });
 
-        const query = `
-            INSERT INTO ${this.tableAutorepairs} (
-                name, description, adress, index, workers_amount, phone, email, ranking, password
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            RETURNING *;
-        `;
-
-        const values = [
-            name,
-            description,
-            adress,
-            index,
-            workers_amount ?? 1,
-            phone,
-            email,
-            ranking ?? 0,
-            password,
-        ];
-
-        const result = await this.db.query(query, values);
-        return result.rows[0];
+        return await this.autorepairRepo.save(autorepair);
     }
 
     async findAll() {
-        const query = `SELECT * FROM ${this.tableAutorepairs} ORDER BY autorepair_id`;
-        const result = await this.db.query(query);
-        return result.rows;
+        const autorepairs = await this.autorepairRepo.find({
+            order: { autorepairId: 'ASC' },
+        });
+        return autorepairs.map(a => ({
+            autorepair_id: a.autorepairId,
+            name: a.name,
+            description: a.description,
+            adress: a.adress,
+            index: a.index,
+            workers_amount: a.workersAmount,
+            phone: a.phone,
+            email: a.email,
+            ranking: a.ranking,
+            password: a.password
+        }));
     }
 
     async findOne(id: number) {
-        const query = `SELECT * FROM ${this.tableAutorepairs} WHERE autorepair_id = $1`;
-        const result = await this.db.query(query, [id]);
+        const autorepair = await this.autorepairRepo.findOneBy({ autorepairId: id });
 
-        if (result.rows.length === 0) {
+        if (!autorepair) {
             throw new NotFoundException(`Autorepair with ID ${id} not found`);
         }
 
-        return result.rows[0];
+        return autorepair;
     }
 
     async update(id: number, updateAutorepairDto: UpdateAutorepairDto) {
@@ -76,36 +62,30 @@ export class AutorepairsAdminService {
             return this.findOne(id);
         }
 
-        const setClause = fields
-            .map((field, index) => `${field} = $${index + 2}`)
-            .join(', ');
+        const updateObj: any = {};
+        if (updateAutorepairDto.name !== undefined) updateObj.name = updateAutorepairDto.name;
+        if (updateAutorepairDto.description !== undefined) updateObj.description = updateAutorepairDto.description;
+        if (updateAutorepairDto.adress !== undefined) updateObj.adress = updateAutorepairDto.adress;
+        if (updateAutorepairDto.index !== undefined) updateObj.index = updateAutorepairDto.index;
+        if (updateAutorepairDto.workers_amount !== undefined) updateObj.workersAmount = updateAutorepairDto.workers_amount;
+        if (updateAutorepairDto.phone !== undefined) updateObj.phone = updateAutorepairDto.phone;
+        if (updateAutorepairDto.email !== undefined) updateObj.email = updateAutorepairDto.email;
+        if (updateAutorepairDto.ranking !== undefined) updateObj.ranking = updateAutorepairDto.ranking;
+        if (updateAutorepairDto.password !== undefined) updateObj.password = updateAutorepairDto.password;
 
-        const values = [id, ...Object.values(updateAutorepairDto)];
+        await this.autorepairRepo.update({ autorepairId: id }, updateObj);
 
-        const query = `
-            UPDATE ${this.tableAutorepairs}
-            SET ${setClause}
-            WHERE autorepair_id = $1
-            RETURNING *;
-        `;
-
-        const result = await this.db.query(query, values);
-
-        if (result.rows.length === 0) {
+        const updated = await this.autorepairRepo.findOneBy({ autorepairId: id });
+        if (!updated) {
             throw new NotFoundException(`Autorepair with ID ${id} not found`);
         }
 
-        return result.rows[0];
+        return updated;
     }
 
     async remove(id: number) {
-        const query = `DELETE FROM ${this.tableAutorepairs} WHERE autorepair_id = $1 RETURNING *`;
-        const result = await this.db.query(query, [id]);
-
-        if (result.rows.length === 0) {
-            throw new NotFoundException(`Autorepair with ID ${id} not found`);
-        }
-
-        return result.rows[0];
+        const autorepair = await this.findOne(id);
+        await this.autorepairRepo.delete({ autorepairId: id });
+        return autorepair;
     }
 }

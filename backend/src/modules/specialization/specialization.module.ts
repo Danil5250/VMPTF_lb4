@@ -1,12 +1,12 @@
-import {Module} from "@nestjs/common";
-import {DatabaseModule} from "../config/database.module";
-import {ConfigModule} from "@nestjs/config";
-import {SpecializationController} from "./specialization.controller";
-import {SpecializationService} from "./specialization.service";
-
+import { Module } from '@nestjs/common';
+import { TypeOrmModule } from '@nestjs/typeorm';
+import { SpecializationController } from './specialization.controller';
+import { SpecializationService } from './specialization.service';
+import { Specialization } from '../entities/specialization.entity';
+import { SpecializationAutorepair } from '../entities/specialization-autorepair.entity';
 
 @Module({
-    imports: [ConfigModule, DatabaseModule],
+    imports: [TypeOrmModule.forFeature([Specialization, SpecializationAutorepair])],
     controllers: [SpecializationController],
     providers: [SpecializationService],
 })

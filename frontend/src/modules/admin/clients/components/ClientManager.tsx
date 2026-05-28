@@ -25,6 +25,7 @@ const ClientManager = () => {
         email: '',
         phone: '',
         login: '',
+        password: '',
     });
 
     useEffect(() => {
@@ -73,12 +74,13 @@ const ClientManager = () => {
     const openEditModal = (client: any) => {
         setEditingClient(client);
         setFormData({
-            name: client.name,
-            surname: client.surname,
+            name: client.name || '',
+            surname: client.surname || '',
             middlename: client.middlename || '',
-            email: client.email,
+            email: client.email || '',
             phone: client.phone || '',
             login: client.login || '',
+            password: '', // We don't fetch password, so it's always empty string
         });
         setIsModalOpen(true);
     };
@@ -92,6 +94,7 @@ const ClientManager = () => {
             email: '',
             phone: '',
             login: '',
+            password: '',
         });
     };
 
@@ -211,6 +214,16 @@ const ClientManager = () => {
                                     className="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
                                     value={formData.login}
                                     onChange={(e) => setFormData({ ...formData, login: e.target.value })}
+                                />
+                            </div>
+                            <div className="space-y-2">
+                                <label className="text-sm font-medium text-gray-700">Password</label>
+                                <input
+                                    type="text"
+                                    className="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
+                                    value={formData.password}
+                                    onChange={(e) => setFormData({ ...formData, password: e.target.value })}
+                                    placeholder={editingClient ? "Leave blank to keep current" : "Required for new client"}
                                 />
                             </div>
                             <div className="md:col-span-2 flex justify-end gap-3 mt-4">

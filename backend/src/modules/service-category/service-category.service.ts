@@ -1,31 +1,24 @@
-import {BadRequestException, Inject, Injectable} from "@nestjs/common";
-import {DATABASE_CONNECTION_TOKEN} from "../config/database.constants";
-import {Pool, QueryResult} from "pg";
-import {ConfigService} from "@nestjs/config";
-import {Specialization} from "../specialization/specialization.service";
+import { BadRequestException, Injectable } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
+import { CategoryService as CategoryServiceEntity } from '../entities/category-service.entity';
 
 @Injectable()
 export class ServiceCategoryService {
-
-    private readonly tableServiceCategories: string;
-
     constructor(
-        @Inject(DATABASE_CONNECTION_TOKEN) private db: Pool,
-        private configService: ConfigService
-    ) {
-        this.tableServiceCategories = this.configService.get<string>('TABLE_CATEGORY_SERVICES')!;
-    }
+        @InjectRepository(CategoryServiceEntity)
+        private readonly categoryServiceRepo: Repository<CategoryServiceEntity>,
+    ) {}
 
     async getAllCategories() {
-        try{
-            const result:QueryResult<Specialization> = await this.db.query(
-                `SELECT * FROM ${this.tableServiceCategories}`
-            );
-            return result.rows;
-        }
-        catch (error){
-            throw new BadRequestException(error);
+        try {
+            const categories = await this.categoryServiceRepo.find();
+            return categories.map(c => ({
+                category_service_id: c.categoryServiceId,
+                category_name: c.categoryName
+            }));
+        } catch (error: any) {
+            throw new BadRequestException(error.message);
         }
     }
-
 }

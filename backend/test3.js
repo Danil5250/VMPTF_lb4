@@ -1,0 +1,1 @@
+fetch('http://localhost:8080/api/visits/generateRecordVisit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ visitId: 1, clientId: 1, carId: 1 }) }).then(r => r.text()).then(console.log).catch(console.error);
